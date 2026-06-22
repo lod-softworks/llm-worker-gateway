@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Product>Lod LLM Gateway Contracts</Product>
+    <Description>Shared HTTP and worker message contracts for the Lod LLM Gateway and Windows worker.</Description>
+  </PropertyGroup>
+
+</Project>

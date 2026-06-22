@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Lod.LlmGateway.Contracts/Lod.LlmGateway.Contracts.csproj" />
+    <Project Path="src/Lod.LlmGateway.Gateway/Lod.LlmGateway.Gateway.csproj" />
+    <Project Path="src/Lod.LlmGateway.Gateway.Tests/Lod.LlmGateway.Gateway.Tests.csproj" />
+    <Project Path="src/Lod.LlmGateway.WorkerHost/Lod.LlmGateway.WorkerHost.csproj" />
+  </Folder>
+</Solution>
