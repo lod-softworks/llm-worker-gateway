@@ -1,14 +1,10 @@
-using Lod.LlmGateway.Contracts.HttpContracts.LMStudio;
-using Lod.LlmGateway.Contracts.HttpContracts.OpenAI;
-using Lod.LlmGateway.Contracts.Models.LMStudio;
-using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Api;
 using Lod.LlmGateway.Gateway.Data;
 using Lod.LlmGateway.Gateway.Handlers;
 using Lod.LlmGateway.Gateway.Jobs;
 using Lod.LlmGateway.Gateway.Workers;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.EntityFrameworkCore;
-using System.Text.Json;
 using Scalar.AspNetCore;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -46,6 +42,22 @@ builder.Services.AddScoped<OpenAIModelListHandler>();
 builder.Services.AddScoped<LMStudioChatHandler>();
 builder.Services.AddHostedService<WorkerHealthMonitor>();
 builder.Services.AddHostedService<OpenAIChatCompletionDailyRollupWorker>();
+
+builder.Services.AddAuthentication("ApiKey")
+    .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>("ApiKey", null)
+    .AddScheme<AuthenticationSchemeOptions, WorkerApiKeyAuthenticationHandler>("WorkerApiKey", null);
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("ApiKeyPolicy", policy =>
+    {
+        policy.AddAuthenticationSchemes("ApiKey");
+        policy.RequireAuthenticatedUser();
+    })
+    .AddPolicy("WorkerApiKeyPolicy", policy =>
+    {
+        policy.AddAuthenticationSchemes("WorkerApiKey");
+        policy.RequireAuthenticatedUser();
+    });
 
 builder.Services.AddRazorPages();
 builder.Services.AddEndpointsApiExplorer();
@@ -97,24 +109,26 @@ app.UseStatusCodePages(async statusContext =>
 app.UseStaticFiles();
 app.UseWebSockets();
 app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
     app.MapScalarApiReference(options =>
     {
-        options.WithTitle("LLM Gateway Worker");
+        options.WithTitle("LLM Worker Gateway");
     });
 }
 
 app.MapRazorPages();
 
 RouteGroupBuilder openAiGroup = app.MapGroup("/v1")
+    .RequireAuthorization("ApiKeyPolicy")
     .WithTags("OpenAI");
 
 openAiGroup.MapPost("/chat/completions", async (HttpContext context, OpenAIChatCompletionHandler handler, CancellationToken cancellationToken) =>
         await handler.HandleAsync(context, cancellationToken))
-    .WithSummary("Chat with the LLM using OpenAI Chat Completions")
     .WithDescription("""
                      OpenAI-compatible chat completions endpoint. The gateway matches the requested model to an ordered list of configured OpenAI providers (see OpenAIProviders). Each provider either dispatches to a WebSocket worker or calls an OpenAI-compatible HTTP API. A chain of all matching providers is run in order until a step succeeds.
 
@@ -125,21 +139,22 @@ openAiGroup.MapPost("/chat/completions", async (HttpContext context, OpenAIChatC
 
                      Gateway note: additional request properties not listed in the OpenAPI contract are still accepted at runtime and passed through when serializing the outbound request.
                      """)
-    .Accepts<OpenAIChatCompletionRequestContract>("application/json")
-    .Produces<ChatCompletionResponse>(StatusCodes.Status200OK, "application/json");
+    .Accepts<Lod.LlmGateway.Contracts.Models.OpenAI.ChatCompletionRequest>("application/json")
+    .Produces<Lod.LlmGateway.Contracts.Models.OpenAI.ChatCompletionResponse>(StatusCodes.Status200OK, "application/json");
 
 openAiGroup.MapGet("/models", async (HttpContext context, OpenAIModelListHandler handler, CancellationToken cancellationToken) =>
         await handler.HandleAsync(context, cancellationToken))
-    .WithSummary("List available OpenAI models")
     .WithDescription("""
                     OpenAI-compatible model listing endpoint. The gateway queries configured OpenAI providers in order (Worker and/or Api sources) and returns the first successful `/v1/models` response.
                     """)
-    .Produces<JsonElement>(StatusCodes.Status200OK, "application/json");
+    .Produces<Lod.LlmGateway.Contracts.Models.OpenAI.ModelListResponse>(StatusCodes.Status200OK, "application/json");
 
-app.MapPost("/api/v1/chat", async (HttpContext context, LMStudioChatHandler handler, CancellationToken cancellationToken) =>
+RouteGroupBuilder lmStudioGroup = app.MapGroup("/api/v1")
+    .RequireAuthorization("ApiKeyPolicy")
+    .WithTags("LM Studio");
+
+lmStudioGroup.MapPost("chat", async (HttpContext context, LMStudioChatHandler handler, CancellationToken cancellationToken) =>
         await handler.HandleAsync(context, cancellationToken))
-    .WithTags("LM Studio")
-    .WithSummary("Chat with the LLM using LM Studio API")
     .WithDescription("""
                      LM Studio v1-compatible chat completions endpoint. It relays requests to available connected workers.
 
@@ -149,11 +164,12 @@ app.MapPost("/api/v1/chat", async (HttpContext context, LMStudioChatHandler hand
 
                      Gateway note: runtime request parsing is passthrough-first and may accept additional properties beyond the documented schema.
                      """)
-    .Accepts<LMStudioChatRequestContract>("application/json")
-    .Produces<LMStudioChatResponse>(StatusCodes.Status200OK, "application/json");
+    .Accepts<Lod.LlmGateway.Contracts.Models.OpenAI.ChatCompletionRequest>("application/json")
+    .Produces<Lod.LlmGateway.Contracts.Models.OpenAI.ChatCompletionResponse>(StatusCodes.Status200OK, "application/json");
 
 app.Map("/ws/worker", async (HttpContext context, WorkerWebSocketHandler handler, CancellationToken cancellationToken) =>
-    await handler.HandleAsync(context, cancellationToken));
+    await handler.HandleAsync(context, cancellationToken))
+    .RequireAuthorization("WorkerApiKeyPolicy");
 
 using (IServiceScope scope = app.Services.CreateScope())
 {
@@ -162,10 +178,6 @@ using (IServiceScope scope = app.Services.CreateScope())
     if (dbContext.Database.IsSqlite())
     {
         await dbContext.Database.EnsureCreatedAsync();
-    }
-    //else if ((await dbContext.Database.GetPendingMigrationsAsync()).Any())
-    {
-        //await dbContext.Database.MigrateAsync();
     }
 }
 

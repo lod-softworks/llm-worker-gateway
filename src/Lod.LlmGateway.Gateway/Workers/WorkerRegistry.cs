@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Linq;
 using Lod.LlmGateway.Contracts;
 
 namespace Lod.LlmGateway.Gateway.Workers;
@@ -18,29 +17,15 @@ public sealed class WorkerRegistry
 
     public IEnumerable<string> ConnectedWorkerIds => sessions.Keys;
 
-    public Task<WorkerSession> AcceptWorkerAsync(
+    public async Task<WorkerSession> AcceptWorkerAsync(
         string workerId,
         WebSocket socket,
-        CancellationToken cancellationToken)
+        CancellationToken _ = default)
     {
         var session = new WorkerSession(workerId, socket);
         sessions[workerId] = session;
-        return Task.FromResult(session);
-    }
 
-    public bool TryGetAvailableWorker(out WorkerSession? session)
-    {
-        foreach (var candidate in sessions.Values)
-        {
-            if (candidate.IsAvailable)
-            {
-                session = candidate;
-                return true;
-            }
-        }
-
-        session = null;
-        return false;
+        return session;
     }
 
     public IReadOnlyList<WorkerSession> GetAvailableWorkers()
@@ -110,17 +95,11 @@ public sealed class WorkerRegistry
     }
 }
 
-public sealed class WorkerSession
+public sealed class WorkerSession(string workerId, WebSocket socket)
 {
-    public WorkerSession(string workerId, WebSocket socket)
-    {
-        WorkerId = workerId;
-        Socket = socket;
-    }
+    public string WorkerId { get; } = workerId;
 
-    public string WorkerId { get; }
-
-    public WebSocket Socket { get; }
+    public WebSocket Socket { get; } = socket;
 
     public DateTimeOffset LastHeartbeat { get; private set; } = DateTimeOffset.UtcNow;
 
@@ -133,15 +112,13 @@ public sealed class WorkerSession
         LastHeartbeat = DateTimeOffset.UtcNow;
     }
 
-    public Task MarkBusyAsync(CancellationToken cancellationToken)
+    public async Task MarkBusyAsync(CancellationToken _ = default)
     {
         IsBusy = true;
-        return Task.CompletedTask;
     }
 
-    public Task MarkIdleAsync(CancellationToken cancellationToken)
+    public async Task MarkIdleAsync(CancellationToken _ = default)
     {
         IsBusy = false;
-        return Task.CompletedTask;
     }
 }

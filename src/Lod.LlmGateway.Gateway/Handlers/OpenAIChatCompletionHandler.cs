@@ -10,7 +10,6 @@ namespace Lod.LlmGateway.Gateway.Handlers;
 public sealed class OpenAIChatCompletionHandler(
     ILogger<OpenAIChatCompletionHandler> logger,
     JobRouter jobRouter,
-    ApiKeyAuthorizer apiKeyAuthorizer,
     OpenAIChatCompletionTelemetryWriter telemetryWriter)
 {
     static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
@@ -20,19 +19,7 @@ public sealed class OpenAIChatCompletionHandler(
         Guid requestId = Guid.NewGuid();
         DateTimeOffset requestReceivedUtc = DateTimeOffset.UtcNow;
 
-        if (!apiKeyAuthorizer.IsClientAuthorized(httpContext))
-        {
-            logger.LogWarning("Client request connection rejected: missing or invalid API key header. Client provided key '{Provided}' does not match configured key '{Configured}'.",
-                ApiKeyAuthorizer.ObfuscateKey(ApiKeyAuthorizer.GetApiKey(httpContext) ?? ""),
-                string.Join(", ", apiKeyAuthorizer.ClientObfuscatedKeys));
-
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status401Unauthorized,
-                "Missing or invalid API key.",
-                type: "authentication_error");
-        }
-
-        string? clientName = apiKeyAuthorizer.GetAuthorizedClientName(httpContext);
+        string? clientName = httpContext.User.Identity?.Name;
 
         httpContext.Request.EnableBuffering();
         using StreamReader requestReader = new(httpContext.Request.Body, leaveOpen: true);
@@ -46,157 +33,165 @@ public sealed class OpenAIChatCompletionHandler(
         }
         catch (JsonException)
         {
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status400BadRequest,
-                "Invalid chat completion request.",
-                type: "invalid_request_error");
+            return GatewayResults.OpenAIError(StatusCodes.Status400BadRequest, "Invalid chat completion request.", type: "invalid_request_error");
         }
 
         if (request is null)
         {
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status400BadRequest,
-                "Invalid chat completion request.",
-                type: "invalid_request_error");
+            return GatewayResults.OpenAIError(StatusCodes.Status400BadRequest, "Invalid chat completion request.", type: "invalid_request_error");
         }
         else if (request.Messages.ValueKind != JsonValueKind.Array || request.Messages.GetArrayLength() == 0)
         {
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status400BadRequest,
-                "No messages received in the request.",
-                type: "invalid_request_error");
+            return GatewayResults.OpenAIError(StatusCodes.Status400BadRequest, "No messages received in the request.", type: "invalid_request_error");
         }
-        else if (logger.IsEnabled(LogLevel.Trace))
+        else
         {
             logger.LogTrace("Received chat completion request ({Id}). Request: {Request}",
                 requestId, requestText);
         }
 
-        if (request.Stream)
-        {
-            return Results.Stream(
-                async (outputStream) =>
+        return request.Stream
+            ? HandleStreamResponse(requestId, clientName, request, requestReceivedUtc, cancellationToken)
+            : await HandleNonStreamResponseAsync(requestId, clientName, request, requestReceivedUtc, cancellationToken);
+    }
+
+    private IResult HandleStreamResponse(
+        Guid requestId,
+        string? clientName,
+        ChatCompletionRequest request,
+        DateTimeOffset requestReceivedUtc,
+        CancellationToken cancellationToken)
+    {
+        return Results.Stream(
+            async (outputStream) =>
+            {
+                DateTimeOffset requestSentUtc = DateTimeOffset.UtcNow;
+                string? streamError = null;
+                DateTimeOffset? firstChunkSentUtc = null;
+                DateTimeOffset? finalChunkSentUtc = null;
+                int streamChunkCount = 0;
+                JsonElement? streamUsage = null;
+                string? rawStreamUsageJson = null;
+                OpenAIChatCompletionChainStreamTelemetryCapture capture = new();
+                try
                 {
-                    DateTimeOffset requestSentUtc = DateTimeOffset.UtcNow;
-                    string? streamError = null;
-                    DateTimeOffset? firstChunkSentUtc = null;
-                    DateTimeOffset? finalChunkSentUtc = null;
-                    int streamChunkCount = 0;
-                    JsonElement? streamUsage = null;
-                    string? rawStreamUsageJson = null;
-                    OpenAIChatCompletionChainStreamTelemetryCapture capture = new();
-                    try
+                    await foreach (StreamChunk chunk in jobRouter.EnqueueAndStreamAsync(
+                        request,
+                        capture,
+                        DefaultTimeout,
+                        cancellationToken))
                     {
-                        await foreach (StreamChunk chunk in jobRouter.EnqueueAndStreamAsync(
-                            request,
-                            capture,
-                            DefaultTimeout,
-                            cancellationToken))
+                        string line;
+                        if (chunk.IsDone)
                         {
-                            string line;
-                            if (chunk.IsDone)
+                            if (!string.IsNullOrEmpty(chunk.Error))
                             {
-                                if (!string.IsNullOrEmpty(chunk.Error))
+                                streamError = chunk.Error;
+                                string errorPayload = JsonSerializer.Serialize(new
                                 {
-                                    streamError = chunk.Error;
-                                    string errorPayload = JsonSerializer.Serialize(new
+                                    error = new
                                     {
-                                        error = new
-                                        {
-                                            message = chunk.Error,
-                                            type = "server_error",
-                                            code = (string?)null
-                                        }
-                                    });
-                                    await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
-                                    await outputStream.FlushAsync(cancellationToken);
-                                }
-
-                                line = "data: [DONE]\n\n";
-                            }
-                            else
-                            {
-                                capture.ResponseModel = ResolveStreamResponseModel(chunk.Data, capture.ResponseModel);
-                                StreamUsageCapture usageCapture = ResolveStreamUsage(chunk.Data, streamUsage, rawStreamUsageJson);
-                                streamUsage = usageCapture.Usage;
-                                rawStreamUsageJson = usageCapture.RawUsageJson;
-                                if (!string.Equals(chunk.Data, "[DONE]", StringComparison.Ordinal))
-                                {
-                                    streamChunkCount++;
-                                    firstChunkSentUtc ??= DateTimeOffset.UtcNow;
-                                }
-
-                                line = $"data: {chunk.Data}\n\n";
+                                        message = chunk.Error,
+                                        type = "server_error",
+                                        code = (string?)null
+                                    }
+                                });
+                                await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
+                                await outputStream.FlushAsync(cancellationToken);
                             }
 
-                            await outputStream.WriteAsync(Encoding.UTF8.GetBytes(line), cancellationToken);
-                            await outputStream.FlushAsync(cancellationToken);
-                            finalChunkSentUtc = DateTimeOffset.UtcNow;
-
-                            if (logger.IsEnabled(LogLevel.Trace))
-                            {
-                                logger.LogTrace("Response chunk for completion request ({Id}): {Chunk}", requestId, line);
-                            }
+                            line = "data: [DONE]\n\n";
                         }
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-
-                    if (capture.Telemetry.CloudChainSucceeded is false && string.IsNullOrEmpty(streamError))
-                    {
-                        string errorMessage = capture.TerminalHttpStatusCode == StatusCodes.Status400BadRequest
-                            ? capture.TerminalError ?? "Provider rejected the request."
-                            : "All connected workers failed to complete the request.";
-                        string errorPayload = JsonSerializer.Serialize(new
+                        else
                         {
-                            error = new
+                            capture.ResponseModel = ResolveStreamResponseModel(chunk.Data, capture.ResponseModel);
+                            StreamUsageCapture usageCapture = ResolveStreamUsage(chunk.Data, streamUsage, rawStreamUsageJson);
+                            streamUsage = usageCapture.Usage;
+                            rawStreamUsageJson = usageCapture.RawUsageJson;
+                            if (!string.Equals(chunk.Data, "[DONE]", StringComparison.Ordinal))
                             {
-                                message = errorMessage,
-                                type = capture.TerminalHttpStatusCode == StatusCodes.Status400BadRequest
-                                    ? "invalid_request_error"
-                                    : "server_error",
-                                code = (string?)null
+                                streamChunkCount++;
+                                firstChunkSentUtc ??= DateTimeOffset.UtcNow;
                             }
-                        });
-                        await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
+
+                            line = $"data: {chunk.Data}\n\n";
+                        }
+
+                        await outputStream.WriteAsync(Encoding.UTF8.GetBytes(line), cancellationToken);
                         await outputStream.FlushAsync(cancellationToken);
                         finalChunkSentUtc = DateTimeOffset.UtcNow;
-                        streamError = errorMessage;
+
+                        if (logger.IsEnabled(LogLevel.Trace))
+                        {
+                            logger.LogTrace("Response chunk for completion request ({Id}): {Chunk}", requestId, line);
+                        }
                     }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
 
-                    bool streamSucceeded = streamError is null;
-                    string? configuredModel = streamSucceeded ? request.Model : null;
-                    string? responseFallbackModel = streamSucceeded ? request.Model : null;
+                if (capture.Telemetry.CloudChainSucceeded is false && string.IsNullOrEmpty(streamError))
+                {
+                    string errorMessage = capture.TerminalHttpStatusCode == StatusCodes.Status400BadRequest
+                        ? capture.TerminalError ?? "Provider rejected the request."
+                        : "All connected workers failed to complete the request.";
+                    string errorPayload = JsonSerializer.Serialize(new
+                    {
+                        error = new
+                        {
+                            message = errorMessage,
+                            type = capture.TerminalHttpStatusCode == StatusCodes.Status400BadRequest
+                                ? "invalid_request_error"
+                                : "server_error",
+                            code = (string?)null
+                        }
+                    });
+                    await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
+                    await outputStream.FlushAsync(cancellationToken);
+                    finalChunkSentUtc = DateTimeOffset.UtcNow;
+                    streamError = errorMessage;
+                }
 
-                    DateTimeOffset responseSentUtc = DateTimeOffset.UtcNow;
-                    await telemetryWriter.WriteStream(
-                        new OpenAIChatCompletionRequestTelemetry(
-                            requestId.ToString("n"),
-                            clientName,
-                            requestReceivedUtc,
-                            requestSentUtc,
-                            responseSentUtc,
-                            ConfiguredModel: configuredModel,
-                            RequestModel: request.Model,
-                            ResponseFallbackModel: responseFallbackModel,
-                            ResponseModel: streamSucceeded ? capture.ResponseModel : null,
-                            Streamed: true,
-                            HttpStatusCode: StatusCodes.Status200OK,
-                            Error: streamError,
-                            ChainTelemetry: capture.Telemetry),
-                        new OpenAIChatCompletionStreamTelemetry(
-                            firstChunkSentUtc,
-                            finalChunkSentUtc,
-                            streamChunkCount,
-                            streamUsage,
-                            rawStreamUsageJson),
-                        cancellationToken);
-                },
-                "text/event-stream");
-        }
+                bool streamSucceeded = streamError is null;
+                string? configuredModel = streamSucceeded ? request.Model : null;
+                string? responseFallbackModel = streamSucceeded ? request.Model : null;
 
+                DateTimeOffset responseSentUtc = DateTimeOffset.UtcNow;
+                await telemetryWriter.WriteStream(
+                    new OpenAIChatCompletionRequestTelemetry(
+                        requestId.ToString("n"),
+                        clientName,
+                        requestReceivedUtc,
+                        requestSentUtc,
+                        responseSentUtc,
+                        ConfiguredModel: configuredModel,
+                        RequestModel: request.Model,
+                        ResponseFallbackModel: responseFallbackModel,
+                        ResponseModel: streamSucceeded ? capture.ResponseModel : null,
+                        Streamed: true,
+                        HttpStatusCode: StatusCodes.Status200OK,
+                        Error: streamError,
+                        ChainTelemetry: capture.Telemetry),
+                    new OpenAIChatCompletionStreamTelemetry(
+                        firstChunkSentUtc,
+                        finalChunkSentUtc,
+                        streamChunkCount,
+                        streamUsage,
+                        rawStreamUsageJson),
+                    cancellationToken);
+            },
+            "text/event-stream");
+    }
+
+    private async Task<IResult> HandleNonStreamResponseAsync(
+        Guid requestId,
+        string? clientName,
+        ChatCompletionRequest request,
+        DateTimeOffset requestReceivedUtc,
+        CancellationToken cancellationToken)
+    {
         DateTimeOffset requestSentNonStreamUtc = DateTimeOffset.UtcNow;
         try
         {

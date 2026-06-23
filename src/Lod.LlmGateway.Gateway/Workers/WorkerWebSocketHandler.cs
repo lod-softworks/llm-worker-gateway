@@ -9,28 +9,17 @@ namespace Lod.LlmGateway.Gateway.Workers;
 
 public sealed class WorkerWebSocketHandler(
     WorkerRegistry workerRegistry,
-    ApiKeyAuthorizer apiKeyAuthorizer,
     JobRouter jobRouter,
     ILogger<WorkerWebSocketHandler> logger)
 {
     const int MaxMessageBytes = 1024 * 1024;
     readonly WorkerRegistry workerRegistry = workerRegistry;
-    readonly ApiKeyAuthorizer apiKeyAuthorizer = apiKeyAuthorizer;
     readonly JobRouter jobRouter = jobRouter;
     readonly ILogger<WorkerWebSocketHandler> logger = logger;
     readonly JsonSerializerOptions serializerOptions = new(JsonSerializerDefaults.Web);
 
     public async Task HandleAsync(HttpContext httpContext, CancellationToken cancellationToken)
     {
-        if (!apiKeyAuthorizer.IsWorkerAuthorized(httpContext))
-        {
-            logger.LogWarning("Worker WebSocket connection rejected: missing or invalid X-Api-Key. Worker provided key '{Provided}' does not match configured key '{Configured}'.",
-                ApiKeyAuthorizer.ObfuscateKey(ApiKeyAuthorizer.GetApiKey(httpContext) ?? ""),
-                apiKeyAuthorizer.WorkerObfuscatedKey);
-            httpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return;
-        }
-
         if (!httpContext.WebSockets.IsWebSocketRequest)
         {
             httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;

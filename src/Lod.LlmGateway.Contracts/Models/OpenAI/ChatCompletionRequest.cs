@@ -1,6 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
-
 namespace Lod.LlmGateway.Contracts.Models.OpenAI;
 
 public sealed record class ChatCompletionRequest

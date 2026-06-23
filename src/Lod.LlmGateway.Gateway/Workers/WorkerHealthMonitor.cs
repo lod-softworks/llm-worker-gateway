@@ -1,6 +1,3 @@
-using Lod.LlmGateway.Gateway.Workers;
-using Microsoft.Extensions.Hosting;
-
 namespace Lod.LlmGateway.Gateway.Workers;
 
 /// <summary>

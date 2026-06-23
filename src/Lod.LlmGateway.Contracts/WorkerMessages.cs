@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Lod.LlmGateway.Contracts.Models.LMStudio;
 using Lod.LlmGateway.Contracts.Models.OpenAI;
 

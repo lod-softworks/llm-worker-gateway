@@ -1,4 +1,3 @@
-using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Api;
 using Lod.LlmGateway.Gateway.Jobs;
 using System.Text.Json;
@@ -6,21 +5,12 @@ using System.Text.Json;
 namespace Lod.LlmGateway.Gateway.Handlers;
 
 public sealed class OpenAIModelListHandler(
-    JobRouter jobRouter,
-    ApiKeyAuthorizer apiKeyAuthorizer)
+    JobRouter jobRouter)
 {
     static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
 
-    public async Task<IResult> HandleAsync(HttpContext httpContext, CancellationToken cancellationToken)
+    public async Task<IResult> HandleAsync(HttpContext _, CancellationToken cancellationToken)
     {
-        if (!apiKeyAuthorizer.IsClientAuthorized(httpContext))
-        {
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status401Unauthorized,
-                "Missing or invalid API key.",
-                type: "authentication_error");
-        }
-
         try
         {
             JsonElement result = await jobRouter.EnqueueModelListAndAwaitAsync(
@@ -48,10 +38,7 @@ public sealed class OpenAIModelListHandler(
                 ? "Unable to list models from any OpenAI provider."
                 : exception.Message;
 
-            return GatewayResults.OpenAIError(
-                statusCode,
-                message,
-                type: statusCode >= 500 ? "server_error" : "gateway_error");
+            return GatewayResults.OpenAIError(statusCode, message, type: statusCode >= 500 ? "server_error" : "gateway_error");
         }
     }
 }

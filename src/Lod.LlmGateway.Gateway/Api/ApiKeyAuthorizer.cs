@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 
 namespace Lod.LlmGateway.Gateway.Api;
 
@@ -19,7 +22,6 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
         return options.Value.Clients.Any(kv => IsAuthorized(httpContext, kv.Value));
     }
 
-
     public string? GetAuthorizedClientName(HttpContext httpContext)
     {
         string? apiKey = GetApiKey(httpContext);
@@ -30,7 +32,7 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
 
         foreach (KeyValuePair<string, string> client in options.Value.Clients)
         {
-            if (string.Equals(client.Value, apiKey, StringComparison.Ordinal))
+            if (SafeEquals(client.Value, apiKey))
             {
                 return client.Key;
             }
@@ -51,9 +53,9 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
 
     public static string? GetApiKey(HttpContext httpContext)
     {
-        if (httpContext.Request.Headers.TryGetValue("X-Api-Key", out var values))
+        if (httpContext.Request.Headers.TryGetValue("X-Api-Key", out StringValues values))
         {
-            foreach (var value in values)
+            foreach (string? value in values)
             {
                 if (!string.IsNullOrWhiteSpace(value))
                 {
@@ -62,9 +64,9 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
             }
         }
 
-        if (httpContext.Request.Headers.TryGetValue("AuthToken", out var authTokenValues))
+        if (httpContext.Request.Headers.TryGetValue("AuthToken", out StringValues authTokenValues))
         {
-            foreach (var value in authTokenValues)
+            foreach (string? value in authTokenValues)
             {
                 if (!string.IsNullOrWhiteSpace(value))
                 {
@@ -73,7 +75,7 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
             }
         }
 
-        if (httpContext.Request.Headers.TryGetValue("Authorization", out var authorizationValues))
+        if (httpContext.Request.Headers.TryGetValue("Authorization", out StringValues authorizationValues))
         {
             foreach (string? value in authorizationValues)
             {
@@ -85,9 +87,9 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
             }
         }
 
-        if (httpContext.Request.Query.TryGetValue("apiKey", out var queryValues))
+        if (httpContext.Request.Query.TryGetValue("apiKey", out StringValues queryValues))
         {
-            foreach (var value in queryValues)
+            foreach (string? value in queryValues)
             {
                 if (!string.IsNullOrWhiteSpace(value))
                 {
@@ -118,6 +120,18 @@ public sealed class ApiKeyAuthorizer(IOptions<ApiKeyOptions> options)
     }
 
     static bool IsAuthorized(HttpContext httpContext, string? configuredKey) =>
-        string.IsNullOrWhiteSpace(configuredKey) ||
-        string.Equals(GetApiKey(httpContext), configuredKey, StringComparison.Ordinal);
+        !string.IsNullOrWhiteSpace(configuredKey) &&
+        SafeEquals(GetApiKey(httpContext), configuredKey);
+
+    private static bool SafeEquals(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+        {
+            return false;
+        }
+
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(a),
+            Encoding.UTF8.GetBytes(b));
+    }
 }
