@@ -163,9 +163,9 @@ using (IServiceScope scope = app.Services.CreateScope())
     {
         await dbContext.Database.EnsureCreatedAsync();
     }
-    else if ((await dbContext.Database.GetPendingMigrationsAsync()).Any())
+    //else if ((await dbContext.Database.GetPendingMigrationsAsync()).Any())
     {
-        await dbContext.Database.MigrateAsync();
+        //await dbContext.Database.MigrateAsync();
     }
 }
 
