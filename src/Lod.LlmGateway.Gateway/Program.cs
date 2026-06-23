@@ -163,7 +163,7 @@ using (IServiceScope scope = app.Services.CreateScope())
     {
         await dbContext.Database.EnsureCreatedAsync();
     }
-    else
+    else if ((await dbContext.Database.GetPendingMigrationsAsync()).Any())
     {
         await dbContext.Database.MigrateAsync();
     }
