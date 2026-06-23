@@ -46,7 +46,7 @@ public sealed class OpenAIChatCompletionClient(
         }
     }
 
-    public async Task<OpenAIModelListResponse> ListModelsAsync(CancellationToken cancellationToken)
+    public async Task<JsonElement> ListModelsAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -60,7 +60,7 @@ public sealed class OpenAIChatCompletionClient(
                     response.StatusCode);
             }
 
-            OpenAIModelListResponse? result = await response.Content.ReadFromJsonAsync<OpenAIModelListResponse>(serializerOptions, cancellationToken);
+            JsonElement? result = await response.Content.ReadFromJsonAsync<JsonElement>(serializerOptions, cancellationToken);
             return result ?? throw new InvalidOperationException("OpenAI model list returned an empty response.");
         }
         catch (HttpRequestException httpException)

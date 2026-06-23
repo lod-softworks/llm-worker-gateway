@@ -9,7 +9,7 @@ namespace Lod.LlmGateway.Gateway.Handlers;
 
 public sealed class OpenAIChatCompletionHandler(
     ILogger<OpenAIChatCompletionHandler> logger,
-    OpenAIChatCompletionProviderChainService providerChain,
+    JobRouter jobRouter,
     ApiKeyAuthorizer apiKeyAuthorizer,
     OpenAIChatCompletionTelemetryWriter telemetryWriter)
 {
@@ -72,34 +72,6 @@ public sealed class OpenAIChatCompletionHandler(
                 requestId, requestText);
         }
 
-        IReadOnlyList<OpenAIChatCompletionProvider> chain = providerChain.BuildMatchingChain(request.Model);
-        if (chain.Count == 0)
-        {
-            const string noMatchMessage = "No OpenAI chat completion provider matches the requested model.";
-            await telemetryWriter.WriteRequest(
-                new OpenAIChatCompletionRequestTelemetry(
-                    requestId.ToString("n"),
-                    clientName,
-                    requestReceivedUtc,
-                    null,
-                    DateTimeOffset.UtcNow,
-                    ConfiguredModel: null,
-                    RequestModel: request.Model,
-                    ResponseFallbackModel: null,
-                    ResponseModel: null,
-                    Streamed: request.Stream,
-                    CloudFallbackUsed: false,
-                    HttpStatusCode: StatusCodes.Status400BadRequest,
-                    Error: noMatchMessage,
-                    CloudFallbackChainTelemetry: null),
-                cancellationToken);
-
-            return GatewayResults.OpenAIError(
-                StatusCodes.Status400BadRequest,
-                noMatchMessage,
-                type: "invalid_request_error");
-        }
-
         if (request.Stream)
         {
             return Results.Stream(
@@ -110,13 +82,12 @@ public sealed class OpenAIChatCompletionHandler(
                     DateTimeOffset? firstChunkSentUtc = null;
                     DateTimeOffset? finalChunkSentUtc = null;
                     int streamChunkCount = 0;
-                    ChatCompletionUsage? streamUsage = null;
+                    JsonElement? streamUsage = null;
                     string? rawStreamUsageJson = null;
                     OpenAIChatCompletionChainStreamTelemetryCapture capture = new();
                     try
                     {
-                        await foreach (StreamChunk chunk in providerChain.StreamWithChainAsync(
-                            chain,
+                        await foreach (StreamChunk chunk in jobRouter.EnqueueAndStreamAsync(
                             request,
                             capture,
                             DefaultTimeout,
@@ -177,7 +148,7 @@ public sealed class OpenAIChatCompletionHandler(
                     {
                         string errorMessage = capture.TerminalHttpStatusCode == StatusCodes.Status400BadRequest
                             ? capture.TerminalError ?? "Provider rejected the request."
-                            : "All OpenAI provider steps failed for this request.";
+                            : "All connected workers failed to complete the request.";
                         string errorPayload = JsonSerializer.Serialize(new
                         {
                             error = new
@@ -195,11 +166,8 @@ public sealed class OpenAIChatCompletionHandler(
                         streamError = errorMessage;
                     }
 
-                    bool cloudFallback = capture is { Telemetry.CloudChainSucceeded: true, WinningSource: OpenAIProviderSource.Api };
                     bool streamSucceeded = streamError is null;
-                    string? configuredModel = streamSucceeded
-                        ? ResolveConfiguredModel(chain, request.Model, capture.Telemetry.WinnerIndex)
-                        : null;
+                    string? configuredModel = streamSucceeded ? request.Model : null;
                     string? responseFallbackModel = streamSucceeded ? request.Model : null;
 
                     DateTimeOffset responseSentUtc = DateTimeOffset.UtcNow;
@@ -215,11 +183,9 @@ public sealed class OpenAIChatCompletionHandler(
                             ResponseFallbackModel: responseFallbackModel,
                             ResponseModel: streamSucceeded ? capture.ResponseModel : null,
                             Streamed: true,
-                            CloudFallbackUsed: cloudFallback,
                             HttpStatusCode: StatusCodes.Status200OK,
                             Error: streamError,
-                            CloudFallbackChainTelemetry: capture.Telemetry,
-                            WinningSource: capture.WinningSource),
+                            ChainTelemetry: capture.Telemetry),
                         new OpenAIChatCompletionStreamTelemetry(
                             firstChunkSentUtc,
                             finalChunkSentUtc,
@@ -234,15 +200,13 @@ public sealed class OpenAIChatCompletionHandler(
         DateTimeOffset requestSentNonStreamUtc = DateTimeOffset.UtcNow;
         try
         {
-            OpenAIChatCompletionNonStreamResult result = await providerChain.TryRunChainAsync(
+            OpenAIChatCompletionNonStreamResult result = await jobRouter.EnqueueAndAwaitAsync(
                 request,
-                chain,
                 DefaultTimeout,
                 cancellationToken);
 
             if (result is { Succeeded: true, Response: { } r })
             {
-                bool usedApi = result.WinningSource == OpenAIProviderSource.Api;
                 string json = JsonSerializer.Serialize(r);
                 if (logger.IsEnabled(LogLevel.Trace))
                 {
@@ -256,16 +220,14 @@ public sealed class OpenAIChatCompletionHandler(
                         requestReceivedUtc,
                         requestSentNonStreamUtc,
                         DateTimeOffset.UtcNow,
-                        ConfiguredModel: ResolveConfiguredModel(chain, request.Model, result.ChainTelemetry.WinnerIndex),
+                        ConfiguredModel: request.Model,
                         RequestModel: request.Model,
                         ResponseFallbackModel: request.Model,
                         ResponseModel: null,
                         Streamed: false,
-                        CloudFallbackUsed: usedApi,
                         HttpStatusCode: StatusCodes.Status200OK,
                         Error: null,
-                        CloudFallbackChainTelemetry: result.ChainTelemetry,
-                        WinningSource: result.WinningSource),
+                        ChainTelemetry: result.ChainTelemetry),
                     new OpenAIChatCompletionNonStreamTelemetry(r),
                     cancellationToken);
 
@@ -274,7 +236,7 @@ public sealed class OpenAIChatCompletionHandler(
 
             int statusCode = result.TerminalHttpStatusCode ?? StatusCodes.Status502BadGateway;
             string errorMessage = string.IsNullOrWhiteSpace(result.TerminalError)
-                ? "All OpenAI provider steps failed for this request."
+                ? "All connected workers failed to complete the request."
                 : result.TerminalError!;
 
             logger.LogWarning("OpenAI provider chain did not return a success for request ({Id}).", requestId);
@@ -291,10 +253,9 @@ public sealed class OpenAIChatCompletionHandler(
                     ResponseFallbackModel: null,
                     ResponseModel: null,
                     Streamed: false,
-                    CloudFallbackUsed: false,
                     HttpStatusCode: statusCode,
                     Error: errorMessage,
-                    CloudFallbackChainTelemetry: result.ChainTelemetry),
+                    ChainTelemetry: result.ChainTelemetry),
                 cancellationToken);
 
             if (result.TerminalHttpStatusCode is StatusCodes.Status400BadRequest)
@@ -314,27 +275,6 @@ public sealed class OpenAIChatCompletionHandler(
         {
             throw;
         }
-    }
-
-    static string? ResolveConfiguredModel(IReadOnlyList<OpenAIChatCompletionProvider> chain, string? requestModel, int? winnerIndex)
-    {
-        if (winnerIndex.HasValue && winnerIndex.Value >= 0 && winnerIndex.Value < chain.Count)
-        {
-            return ResolveConfiguredModel(chain[winnerIndex.Value], requestModel);
-        }
-
-        OpenAIChatCompletionProvider? firstProvider = chain.FirstOrDefault();
-        return firstProvider is null ? null : ResolveConfiguredModel(firstProvider, requestModel);
-    }
-
-    static string? ResolveConfiguredModel(OpenAIChatCompletionProvider provider, string? requestModel)
-    {
-        if (string.IsNullOrWhiteSpace(provider.Model) is false)
-        {
-            return provider.Model.Trim();
-        }
-
-        return OpenAIChatCompletionProviderMatcher.ResolveMatchedConfiguredModel(provider, requestModel);
     }
 
     static string? ResolveStreamResponseModel(string? chunkData, string? fallbackModel)
@@ -365,7 +305,7 @@ public sealed class OpenAIChatCompletionHandler(
         return fallbackModel;
     }
 
-    static StreamUsageCapture ResolveStreamUsage(string? chunkData, ChatCompletionUsage? fallbackUsage, string? fallbackRawUsageJson)
+    static StreamUsageCapture ResolveStreamUsage(string? chunkData, JsonElement? fallbackUsage, string? fallbackRawUsageJson)
     {
         if (string.IsNullOrWhiteSpace(chunkData) || string.Equals(chunkData, "[DONE]", StringComparison.Ordinal))
         {
@@ -381,7 +321,7 @@ public sealed class OpenAIChatCompletionHandler(
                 return new StreamUsageCapture(fallbackUsage, fallbackRawUsageJson);
             }
 
-            ChatCompletionUsage? usage = usageElement.Deserialize<ChatCompletionUsage>();
+            JsonElement? usage = JsonDocument.Parse(usageElement.GetRawText()).RootElement;
             return new StreamUsageCapture(usage ?? fallbackUsage, usageElement.GetRawText());
         }
         catch (JsonException)
@@ -390,5 +330,5 @@ public sealed class OpenAIChatCompletionHandler(
         }
     }
 
-    sealed record class StreamUsageCapture(ChatCompletionUsage? Usage, string? RawUsageJson);
+    sealed record class StreamUsageCapture(JsonElement? Usage, string? RawUsageJson);
 }

@@ -1,10 +1,9 @@
-using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Lod.LlmGateway.Gateway.Data;
 
-[Table("LMStudioChat", Schema = "llm_gateway")]
+[Table("LMStudioChat", Schema = "llm_worker_gateway")]
 public sealed record class LMStudioChatRecord
 {
     [Key]

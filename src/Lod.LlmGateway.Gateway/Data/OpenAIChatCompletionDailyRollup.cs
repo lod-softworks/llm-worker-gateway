@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Lod.LlmGateway.Gateway.Data;
 
-[Table("OpenAIChatCompletionDailyRollup", Schema = "llm_gateway")]
+[Table("OpenAIChatCompletionDailyRollup", Schema = "llm_worker_gateway")]
 public sealed record class OpenAIChatCompletionDailyRollup
 {
     [Key]

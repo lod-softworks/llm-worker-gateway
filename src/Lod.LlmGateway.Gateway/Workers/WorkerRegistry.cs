@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Linq;
 using Lod.LlmGateway.Contracts;
 
 namespace Lod.LlmGateway.Gateway.Workers;
@@ -40,6 +41,11 @@ public sealed class WorkerRegistry
 
         session = null;
         return false;
+    }
+
+    public IReadOnlyList<WorkerSession> GetAvailableWorkers()
+    {
+        return sessions.Values.Where(s => s.IsAvailable).ToList();
     }
 
     public bool TryGetById(string workerId, out WorkerSession? session)

@@ -5,62 +5,112 @@ using Lod.LlmGateway.Contracts;
 using Lod.LlmGateway.Contracts.Models.LMStudio;
 using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Workers;
+using Lod.LlmGateway.Gateway.Api;
+using Lod.LlmGateway.Gateway.Data;
+using System.Text.Json;
 
 namespace Lod.LlmGateway.Gateway.Jobs;
 
 public readonly record struct StreamChunk(bool IsDone, string? Error, string? Data);
 
-public sealed class JobRouter(WorkerRegistry workerRegistry)
+public sealed class JobRouter(
+    WorkerRegistry workerRegistry,
+    ILogger<JobRouter> logger)
 {
     readonly WorkerRegistry workerRegistry = workerRegistry;
+    readonly ILogger<JobRouter> logger = logger;
     readonly ConcurrentDictionary<string, TaskCompletionSource<ChatCompletionResponse>> pending =
         new(StringComparer.Ordinal);
-    readonly ConcurrentDictionary<string, TaskCompletionSource<OpenAIModelListResponse>> pendingModelList =
+    readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingModelList =
         new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, TaskCompletionSource<LMStudioChatResponse>> pendingLMStudio =
         new(StringComparer.Ordinal);
     readonly ConcurrentDictionary<string, (Channel<StreamChunk> Channel, WorkerSession Session)> streaming =
         new(StringComparer.Ordinal);
 
-    public async Task<ChatCompletionResponse> EnqueueAndAwaitAsync(
+    public async Task<OpenAIChatCompletionNonStreamResult> EnqueueAndAwaitAsync(
         ChatCompletionRequest request,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        if (!workerRegistry.TryGetAvailableWorker(out var session) || session is null)
+        var workers = workerRegistry.GetAvailableWorkers();
+        if (workers.Count == 0)
         {
-            throw new NoWorkerAvailableException();
+            return new OpenAIChatCompletionNonStreamResult(
+                false,
+                null,
+                OpenAIChatCompletionChainTelemetry.None,
+                StatusCodes.Status503ServiceUnavailable,
+                "No workers are currently connected.");
         }
 
-        var requestId = Guid.NewGuid().ToString("n");
-        var completionSource = new TaskCompletionSource<ChatCompletionResponse>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        pending[requestId] = completionSource;
-
-        var message = new WorkerJobMessage(
-            WorkerMessageTypes.ChatCompletionsJob,
-            requestId,
-            request);
-
-        await workerRegistry.SendJobAsync(session, message, cancellationToken);
-
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            timeoutSource.Token,
-            cancellationToken);
-
-        try
+        List<OpenAIChatCompletionAttempt> attempts = [];
+        for (int i = 0; i < workers.Count; i++)
         {
-            await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+            var session = workers[i];
+            var requestId = Guid.NewGuid().ToString("n");
+            var completionSource = new TaskCompletionSource<ChatCompletionResponse>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            pending[requestId] = completionSource;
+
+            var message = new WorkerJobMessage(
+                WorkerMessageTypes.ChatCompletionsJob,
+                requestId,
+                request);
+
+            try
             {
-                return await completionSource.Task.ConfigureAwait(false);
+                await workerRegistry.SendJobAsync(session, message, cancellationToken).ConfigureAwait(false);
+
+                using var timeoutSource = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    timeoutSource.Token,
+                    cancellationToken);
+
+                ChatCompletionResponse response;
+                await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+                {
+                    response = await completionSource.Task.ConfigureAwait(false);
+                }
+
+                attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, true, 200, null, "worker"));
+                return new OpenAIChatCompletionNonStreamResult(
+                    true,
+                    response,
+                    OpenAIChatCompletionChainTelemetry.ForWinner(session.WorkerId, i, attempts));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException ex)
+            {
+                attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 504, ex.Message, "worker"));
+                logger.LogWarning(ex, "Worker completion attempt '{WorkerId}' (index {Index}) timed out.", session.WorkerId, i);
+            }
+            catch (JobFailedException ex)
+            {
+                attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 502, ex.Message, "worker"));
+                logger.LogWarning(ex, "Worker completion attempt '{WorkerId}' (index {Index}) job failed: {Message}", session.WorkerId, i, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 500, ex.Message, "worker"));
+                logger.LogWarning(ex, "Worker completion attempt '{WorkerId}' (index {Index}) failed.", session.WorkerId, i);
+            }
+            finally
+            {
+                pending.TryRemove(requestId, out _);
+                await session.MarkIdleAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
-        {
-            pending.TryRemove(requestId, out _);
-            await session.MarkIdleAsync(cancellationToken);
-        }
+
+        return new OpenAIChatCompletionNonStreamResult(
+            false,
+            null,
+            OpenAIChatCompletionChainTelemetry.ForAllFailed(attempts),
+            StatusCodes.Status502BadGateway,
+            "All connected workers failed to complete the request.");
     }
 
     public void CompleteJob(
@@ -83,48 +133,65 @@ public sealed class JobRouter(WorkerRegistry workerRegistry)
         }
     }
 
-    public async Task<OpenAIModelListResponse> EnqueueModelListAndAwaitAsync(
+    public async Task<JsonElement> EnqueueModelListAndAwaitAsync(
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        if (!workerRegistry.TryGetAvailableWorker(out var session) || session is null)
+        var workers = workerRegistry.GetAvailableWorkers();
+        if (workers.Count == 0)
         {
             throw new NoWorkerAvailableException();
         }
 
-        var requestId = Guid.NewGuid().ToString("n");
-        var completionSource = new TaskCompletionSource<OpenAIModelListResponse>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingModelList[requestId] = completionSource;
-
-        var message = new WorkerModelListJobMessage(
-            WorkerMessageTypes.ModelListJob,
-            requestId);
-
-        await workerRegistry.SendJobAsync(session, message, cancellationToken);
-
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            timeoutSource.Token,
-            cancellationToken);
-
-        try
+        List<Exception> errors = [];
+        for (int i = 0; i < workers.Count; i++)
         {
-            await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+            var session = workers[i];
+            var requestId = Guid.NewGuid().ToString("n");
+            var completionSource = new TaskCompletionSource<JsonElement>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingModelList[requestId] = completionSource;
+
+            var message = new WorkerModelListJobMessage(
+                WorkerMessageTypes.ModelListJob,
+                requestId);
+
+            try
             {
-                return await completionSource.Task.ConfigureAwait(false);
+                await workerRegistry.SendJobAsync(session, message, cancellationToken).ConfigureAwait(false);
+
+                using var timeoutSource = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    timeoutSource.Token,
+                    cancellationToken);
+
+                await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+                {
+                    return await completionSource.Task.ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(ex);
+                logger.LogWarning(ex, "Worker model list attempt '{WorkerId}' (index {Index}) failed.", session.WorkerId, i);
+            }
+            finally
+            {
+                pendingModelList.TryRemove(requestId, out _);
+                await session.MarkIdleAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
-        {
-            pendingModelList.TryRemove(requestId, out _);
-            await session.MarkIdleAsync(cancellationToken);
-        }
+
+        throw new AggregateException("All workers failed to list models.", errors);
     }
 
     public void CompleteModelListJob(
         string requestId,
-        OpenAIModelListResponse response)
+        JsonElement response)
     {
         if (pendingModelList.TryGetValue(requestId, out var completionSource))
         {
@@ -147,40 +214,57 @@ public sealed class JobRouter(WorkerRegistry workerRegistry)
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        if (!workerRegistry.TryGetAvailableWorker(out var session) || session is null)
+        var workers = workerRegistry.GetAvailableWorkers();
+        if (workers.Count == 0)
         {
             throw new NoWorkerAvailableException();
         }
 
-        var requestId = Guid.NewGuid().ToString("n");
-        var completionSource = new TaskCompletionSource<LMStudioChatResponse>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingLMStudio[requestId] = completionSource;
-
-        var message = new WorkerLMStudioJobMessage(
-            WorkerMessageTypes.LMStudioJob,
-            requestId,
-            request);
-
-        await workerRegistry.SendJobAsync(session, message, cancellationToken);
-
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            timeoutSource.Token,
-            cancellationToken);
-
-        try
+        List<Exception> errors = [];
+        for (int i = 0; i < workers.Count; i++)
         {
-            await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+            var session = workers[i];
+            var requestId = Guid.NewGuid().ToString("n");
+            var completionSource = new TaskCompletionSource<LMStudioChatResponse>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingLMStudio[requestId] = completionSource;
+
+            var message = new WorkerLMStudioJobMessage(
+                WorkerMessageTypes.LMStudioJob,
+                requestId,
+                request);
+
+            try
             {
-                return await completionSource.Task.ConfigureAwait(false);
+                await workerRegistry.SendJobAsync(session, message, cancellationToken).ConfigureAwait(false);
+
+                using var timeoutSource = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    timeoutSource.Token,
+                    cancellationToken);
+
+                await using (linked.Token.Register(() => completionSource.TrySetCanceled(linked.Token)))
+                {
+                    return await completionSource.Task.ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(ex);
+                logger.LogWarning(ex, "Worker LM Studio attempt '{WorkerId}' (index {Index}) failed.", session.WorkerId, i);
+            }
+            finally
+            {
+                pendingLMStudio.TryRemove(requestId, out _);
+                await session.MarkIdleAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
-        {
-            pendingLMStudio.TryRemove(requestId, out _);
-            await session.MarkIdleAsync(cancellationToken);
-        }
+
+        throw new AggregateException("All workers failed to execute LM Studio completion.", errors);
     }
 
     public void CompleteLMStudioJob(
@@ -205,44 +289,111 @@ public sealed class JobRouter(WorkerRegistry workerRegistry)
 
     public async IAsyncEnumerable<StreamChunk> EnqueueAndStreamAsync(
         ChatCompletionRequest request,
+        OpenAIChatCompletionChainStreamTelemetryCapture capture,
         TimeSpan timeout,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (!workerRegistry.TryGetAvailableWorker(out var session) || session is null)
+        var workers = workerRegistry.GetAvailableWorkers();
+        if (workers.Count == 0)
         {
-            throw new NoWorkerAvailableException();
+            capture.TerminalHttpStatusCode = StatusCodes.Status503ServiceUnavailable;
+            capture.TerminalError = "No workers are currently connected.";
+            yield break;
         }
 
-        var requestId = Guid.NewGuid().ToString("n");
-        var channel = Channel.CreateUnbounded<StreamChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-        streaming[requestId] = (channel, session);
-
-        var message = new WorkerJobMessage(
-            WorkerMessageTypes.ChatCompletionsJob,
-            requestId,
-            request);
-
-        await workerRegistry.SendJobAsync(session, message, cancellationToken);
-
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeoutSource.Token, cancellationToken);
-
-        try
+        List<OpenAIChatCompletionAttempt> attempts = [];
+        for (int i = 0; i < workers.Count; i++)
         {
-            await foreach (var chunk in channel.Reader.ReadAllAsync(linked.Token))
+            var session = workers[i];
+            var requestId = Guid.NewGuid().ToString("n");
+            var channel = Channel.CreateUnbounded<StreamChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+            streaming[requestId] = (channel, session);
+
+            var message = new WorkerJobMessage(
+                WorkerMessageTypes.ChatCompletionsJob,
+                requestId,
+                request);
+
+            bool success = false;
+            IAsyncEnumerator<StreamChunk>? wEnum = null;
+            try
             {
-                yield return chunk;
-                if (chunk.IsDone)
+                await workerRegistry.SendJobAsync(session, message, cancellationToken).ConfigureAwait(false);
+
+                using var timeoutSource = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeoutSource.Token, cancellationToken);
+
+                var stream = channel.Reader.ReadAllAsync(linked.Token);
+                wEnum = stream.GetAsyncEnumerator(linked.Token);
+
+                bool moved;
+                try
                 {
-                    break;
+                    moved = await wEnum.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 504, ex.Message, "worker"));
+                    logger.LogWarning(ex, "Worker stream attempt '{WorkerId}' (index {Index}) timed out during startup.", session.WorkerId, i);
+                    continue;
+                }
+                catch (JobFailedException ex)
+                {
+                    attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 502, ex.Message, "worker"));
+                    logger.LogWarning(ex, "Worker stream attempt '{WorkerId}' (index {Index}) job failed to start.", session.WorkerId, i);
+                    continue;
+                }
+                catch (Exception ex)
+                {
+                    attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 500, ex.Message, "worker"));
+                    logger.LogWarning(ex, "Worker stream attempt '{WorkerId}' (index {Index}) failed to start.", session.WorkerId, i);
+                    continue;
+                }
+
+                if (moved is false)
+                {
+                    attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 502, "Empty stream from worker.", "worker"));
+                    continue;
+                }
+
+                if (wEnum.Current is { IsDone: true, Error: { Length: > 0 } workerStreamError })
+                {
+                    attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, false, 502, workerStreamError, "worker"));
+                    continue;
+                }
+
+                attempts.Add(new OpenAIChatCompletionAttempt(session.WorkerId, i, true, 200, null, "worker"));
+                capture.Telemetry = OpenAIChatCompletionChainTelemetry.ForWinner(session.WorkerId, i, attempts);
+                capture.ResponseModel = string.IsNullOrWhiteSpace(request.Model) is false ? request.Model : null;
+                success = true;
+
+                yield return wEnum.Current;
+                while (await wEnum.MoveNextAsync().ConfigureAwait(false))
+                {
+                    yield return wEnum.Current;
+                }
+                yield break;
+            }
+            finally
+            {
+                if (wEnum is not null)
+                {
+                    await wEnum.DisposeAsync().ConfigureAwait(false);
+                }
+                TryCompleteStreamChannel(requestId);
+                streaming.TryRemove(requestId, out _);
+                if (!success)
+                {
+                    await session.MarkIdleAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
         }
-        finally
-        {
-            TryCompleteStreamChannel(requestId);
-            streaming.TryRemove(requestId, out _);
-        }
+
+        capture.Telemetry = OpenAIChatCompletionChainTelemetry.ForAllFailed(attempts);
     }
 
     public async IAsyncEnumerable<StreamChunk> EnqueueLMStudioAndStreamAsync(
@@ -250,40 +401,82 @@ public sealed class JobRouter(WorkerRegistry workerRegistry)
         TimeSpan timeout,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (!workerRegistry.TryGetAvailableWorker(out var session) || session is null)
+        var workers = workerRegistry.GetAvailableWorkers();
+        if (workers.Count == 0)
         {
             throw new NoWorkerAvailableException();
         }
 
-        var requestId = Guid.NewGuid().ToString("n");
-        var channel = Channel.CreateUnbounded<StreamChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-        streaming[requestId] = (channel, session);
-
-        var message = new WorkerLMStudioJobMessage(
-            WorkerMessageTypes.LMStudioJob,
-            requestId,
-            request);
-
-        await workerRegistry.SendJobAsync(session, message, cancellationToken);
-
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeoutSource.Token, cancellationToken);
-
-        try
+        for (int i = 0; i < workers.Count; i++)
         {
-            await foreach (var chunk in channel.Reader.ReadAllAsync(linked.Token))
+            var session = workers[i];
+            var requestId = Guid.NewGuid().ToString("n");
+            var channel = Channel.CreateUnbounded<StreamChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+            streaming[requestId] = (channel, session);
+
+            var message = new WorkerLMStudioJobMessage(
+                WorkerMessageTypes.LMStudioJob,
+                requestId,
+                request);
+
+            bool success = false;
+            IAsyncEnumerator<StreamChunk>? wEnum = null;
+            try
             {
-                yield return chunk;
-                if (chunk.IsDone)
+                await workerRegistry.SendJobAsync(session, message, cancellationToken).ConfigureAwait(false);
+
+                using var timeoutSource = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeoutSource.Token, cancellationToken);
+
+                var stream = channel.Reader.ReadAllAsync(linked.Token);
+                wEnum = stream.GetAsyncEnumerator(linked.Token);
+
+                bool moved;
+                try
                 {
-                    break;
+                    moved = await wEnum.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Worker LM Studio stream attempt '{WorkerId}' (index {Index}) failed to start.", session.WorkerId, i);
+                    continue;
+                }
+
+                if (moved is false)
+                {
+                    continue;
+                }
+
+                if (wEnum.Current is { IsDone: true, Error: { Length: > 0 } })
+                {
+                    continue;
+                }
+
+                success = true;
+                yield return wEnum.Current;
+                while (await wEnum.MoveNextAsync().ConfigureAwait(false))
+                {
+                    yield return wEnum.Current;
+                }
+                yield break;
+            }
+            finally
+            {
+                if (wEnum is not null)
+                {
+                    await wEnum.DisposeAsync().ConfigureAwait(false);
+                }
+                TryCompleteStreamChannel(requestId);
+                streaming.TryRemove(requestId, out _);
+                if (!success)
+                {
+                    await session.MarkIdleAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
-        }
-        finally
-        {
-            TryCompleteStreamChannel(requestId);
-            streaming.TryRemove(requestId, out _);
         }
     }
 

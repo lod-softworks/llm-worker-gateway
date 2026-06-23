@@ -96,7 +96,7 @@ public sealed record class OpenAIChatCompletionRequestContract
     public JsonElement? Audio { get; init; }
 
     [JsonPropertyName("tools")]
-    public List<ChatCompletionToolDefinition>? Tools { get; init; }
+    public JsonElement? Tools { get; init; }
 
     [JsonPropertyName("tool_choice")]
     public JsonElement? ToolChoice { get; init; }

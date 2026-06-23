@@ -8,5 +8,4 @@ public sealed record OpenAIChatCompletionNonStreamResult(
     ChatCompletionResponse? Response,
     OpenAIChatCompletionChainTelemetry ChainTelemetry,
     int? TerminalHttpStatusCode = null,
-    string? TerminalError = null,
-    OpenAIProviderSource? WinningSource = null);
+    string? TerminalError = null);

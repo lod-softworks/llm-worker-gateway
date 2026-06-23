@@ -110,7 +110,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("LMStudioChat", "llm_gateway");
+                    b.ToTable("LMStudioChat", "llm_worker_gateway");
                 });
 
             modelBuilder.Entity("Lod.LlmGateway.Gateway.Data.OpenAIChatCompletionDailyRollup", b =>
@@ -188,7 +188,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("OpenAIChatCompletionDailyRollup", "llm_gateway");
+                    b.ToTable("OpenAIChatCompletionDailyRollup", "llm_worker_gateway");
                 });
 
             modelBuilder.Entity("Lod.LlmGateway.Gateway.Data.OpenAIChatCompletionNonStreamRecord", b =>
@@ -240,7 +240,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
                     b.HasIndex("RequestId");
 
-                    b.ToTable("OpenAIChatCompletionNonStream", "llm_gateway");
+                    b.ToTable("OpenAIChatCompletionNonStream", "llm_worker_gateway");
                 });
 
             modelBuilder.Entity("Lod.LlmGateway.Gateway.Data.OpenAIChatCompletionRequestRecord", b =>
@@ -319,7 +319,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("OpenAIChatCompletionRequest", "llm_gateway");
+                    b.ToTable("OpenAIChatCompletionRequest", "llm_worker_gateway");
                 });
 
             modelBuilder.Entity("Lod.LlmGateway.Gateway.Data.OpenAIChatCompletionStreamRecord", b =>
@@ -367,7 +367,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
                     b.HasIndex("RequestId");
 
-                    b.ToTable("OpenAIChatCompletionStream", "llm_gateway");
+                    b.ToTable("OpenAIChatCompletionStream", "llm_worker_gateway");
                 });
 
             modelBuilder.Entity("Lod.LlmGateway.Gateway.Data.OpenAIChatCompletionNonStreamRecord", b =>

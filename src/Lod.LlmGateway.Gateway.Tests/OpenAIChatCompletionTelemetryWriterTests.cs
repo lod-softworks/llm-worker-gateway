@@ -34,14 +34,12 @@ public sealed class OpenAIChatCompletionTelemetryWriterTests
                 ResponseFallbackModel: "gpt-5-nano",
                 ResponseModel: null,
                 Streamed: false,
-                CloudFallbackUsed: false,
                 HttpStatusCode: 200,
                 Error: null,
-                CloudFallbackChainTelemetry: OpenAIChatCompletionChainTelemetry.ForWinner(
+                ChainTelemetry: OpenAIChatCompletionChainTelemetry.ForWinner(
                     "Worker",
                     0,
-                    [new OpenAIChatCompletionAttempt("Worker", 0, true, 200, null, "worker")]),
-                WinningSource: OpenAIProviderSource.Worker),
+                    [new OpenAIChatCompletionAttempt("Worker", 0, true, 200, null, "worker")])),
             new OpenAIChatCompletionNonStreamTelemetry(new ChatCompletionResponse
             {
                 Id = "response-id",
@@ -79,14 +77,12 @@ public sealed class OpenAIChatCompletionTelemetryWriterTests
                 ResponseFallbackModel: "gpt-5-nano",
                 ResponseModel: "gpt-5-nano",
                 Streamed: true,
-                CloudFallbackUsed: false,
                 HttpStatusCode: 200,
                 Error: null,
-                CloudFallbackChainTelemetry: OpenAIChatCompletionChainTelemetry.ForWinner(
+                ChainTelemetry: OpenAIChatCompletionChainTelemetry.ForWinner(
                     "Worker",
                     0,
-                    [new OpenAIChatCompletionAttempt("Worker", 0, true, 200, null, "worker")]),
-                WinningSource: OpenAIProviderSource.Worker),
+                    [new OpenAIChatCompletionAttempt("Worker", 0, true, 200, null, "worker")])),
             new OpenAIChatCompletionStreamTelemetry(
                 DateTimeOffset.UtcNow,
                 DateTimeOffset.UtcNow,
@@ -97,50 +93,5 @@ public sealed class OpenAIChatCompletionTelemetryWriterTests
 
         OpenAIChatCompletionRequestRecord record = await dbContext.OpenAIChatCompletionRequest.SingleAsync();
         Assert.Equal("qwen3.6", record.ResponseModel);
-    }
-
-    [Fact]
-    public async Task WriteNonStream_UsesResponseModel_WhenApiReturnsAuthoritativeModel()
-    {
-        await using SqliteConnection connection = new("Data Source=:memory:");
-        await connection.OpenAsync();
-
-        DbContextOptions<GatewayDbContext> options = new DbContextOptionsBuilder<GatewayDbContext>()
-            .UseSqlite(connection)
-            .Options;
-
-        await using GatewayDbContext dbContext = new(options);
-        await dbContext.Database.EnsureCreatedAsync();
-        OpenAIChatCompletionTelemetryWriter writer = new(dbContext, NullLogger<OpenAIChatCompletionTelemetryWriter>.Instance);
-
-        await writer.WriteNonStream(
-            new OpenAIChatCompletionRequestTelemetry(
-                GatewayRequestId: "request-id",
-                Client: null,
-                RequestReceivedUtc: DateTimeOffset.UtcNow,
-                RequestSentUtc: DateTimeOffset.UtcNow,
-                ResponseSentUtc: DateTimeOffset.UtcNow,
-                ConfiguredModel: "configured-model",
-                RequestModel: "gpt-5-nano",
-                ResponseFallbackModel: "gpt-5-nano",
-                ResponseModel: null,
-                Streamed: false,
-                CloudFallbackUsed: true,
-                HttpStatusCode: 200,
-                Error: null,
-                CloudFallbackChainTelemetry: OpenAIChatCompletionChainTelemetry.ForWinner(
-                    "OpenAI",
-                    2,
-                    [new OpenAIChatCompletionAttempt("OpenAI", 2, true, 200, null, "api")]),
-                WinningSource: OpenAIProviderSource.Api),
-            new OpenAIChatCompletionNonStreamTelemetry(new ChatCompletionResponse
-            {
-                Id = "response-id",
-                Model = "api-returned-model"
-            }),
-            CancellationToken.None);
-
-        OpenAIChatCompletionRequestRecord record = await dbContext.OpenAIChatCompletionRequest.SingleAsync();
-        Assert.Equal("api-returned-model", record.ResponseModel);
     }
 }

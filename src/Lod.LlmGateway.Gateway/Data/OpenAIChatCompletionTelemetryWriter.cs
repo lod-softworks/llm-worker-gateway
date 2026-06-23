@@ -15,11 +15,9 @@ public sealed record class OpenAIChatCompletionRequestTelemetry(
     string? ResponseFallbackModel,
     string? ResponseModel,
     bool Streamed,
-    bool CloudFallbackUsed,
     int HttpStatusCode,
     string? Error,
-    OpenAIChatCompletionChainTelemetry? CloudFallbackChainTelemetry,
-    OpenAIProviderSource? WinningSource = null);
+    OpenAIChatCompletionChainTelemetry? ChainTelemetry);
 
 public sealed record class OpenAIChatCompletionNonStreamTelemetry(ChatCompletionResponse Response);
 
@@ -27,7 +25,7 @@ public sealed record class OpenAIChatCompletionStreamTelemetry(
     DateTimeOffset? FirstChunkSentUtc,
     DateTimeOffset? FinalChunkSentUtc,
     int ChunkCount,
-    ChatCompletionUsage? Usage,
+    JsonElement? Usage,
     string? RawUsageJson);
 
 public sealed class OpenAIChatCompletionTelemetryWriter(
@@ -56,16 +54,16 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
         {
             Request = request,
             UpstreamResponseId = response.Id,
-            PromptTokens = response.Usage?.PromptTokens,
-            CompletionTokens = response.Usage?.CompletionTokens,
-            TotalTokens = response.Usage?.TotalTokens,
+            PromptTokens = TryGetInt32(response.Usage, "prompt_tokens"),
+            CompletionTokens = TryGetInt32(response.Usage, "completion_tokens"),
+            TotalTokens = TryGetInt32(response.Usage, "total_tokens"),
             DurationSeconds = durationSeconds,
-            TokensPerSecond = CalculateTokensPerSecond(response.Usage?.CompletionTokens, durationSeconds),
-            PromptCost = TryGetDecimal(response.Usage?.AdditionalProperties, "prompt_cost"),
-            CompletionCost = TryGetDecimal(response.Usage?.AdditionalProperties, "completion_cost"),
-            TotalCost = TryGetDecimal(response.Usage?.AdditionalProperties, "total_cost")
-                ?? TryGetDecimal(response.AdditionalProperties, "cost")
-                ?? TryGetDecimal(response.AdditionalProperties, "total_cost"),
+            TokensPerSecond = CalculateTokensPerSecond(TryGetInt32(response.Usage, "completion_tokens"), durationSeconds),
+            PromptCost = TryGetDecimal(response.Usage, "prompt_cost"),
+            CompletionCost = TryGetDecimal(response.Usage, "completion_cost"),
+            TotalCost = TryGetDecimal(response.Usage, "total_cost")
+                ?? TryGetDecimalFromDict(response.AdditionalProperties, "cost")
+                ?? TryGetDecimalFromDict(response.AdditionalProperties, "total_cost"),
             RawUsageJson = response.Usage is null ? null : JsonSerializer.Serialize(response.Usage)
         });
 
@@ -87,12 +85,12 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
             FirstChunkSentUtc = streamTelemetry.FirstChunkSentUtc,
             FinalChunkSentUtc = streamTelemetry.FinalChunkSentUtc,
             ChunkCount = streamTelemetry.ChunkCount,
-            PromptTokens = streamTelemetry.Usage?.PromptTokens,
-            CompletionTokens = streamTelemetry.Usage?.CompletionTokens,
-            TotalTokens = streamTelemetry.Usage?.TotalTokens,
+            PromptTokens = TryGetInt32(streamTelemetry.Usage, "prompt_tokens"),
+            CompletionTokens = TryGetInt32(streamTelemetry.Usage, "completion_tokens"),
+            TotalTokens = TryGetInt32(streamTelemetry.Usage, "total_tokens"),
             DurationSeconds = durationSeconds,
             TimeToFirstChunkSeconds = timeToFirstChunkSeconds,
-            TokensPerSecond = CalculateTokensPerSecond(streamTelemetry.Usage?.CompletionTokens, durationSeconds),
+            TokensPerSecond = CalculateTokensPerSecond(TryGetInt32(streamTelemetry.Usage, "completion_tokens"), durationSeconds),
             RawUsageJson = streamTelemetry.RawUsageJson
         });
 
@@ -104,8 +102,8 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
         string? responseModel)
     {
         string? resolvedResponseModel = OpenAIChatCompletionModelResolution.ResolveForTelemetry(
-            ResolveUpstreamResponseModel(telemetry, responseModel),
-            ResolveUpstreamResponseModel(telemetry, telemetry.ResponseModel),
+            null,
+            null,
             telemetry.ConfiguredModel,
             telemetry.ResponseFallbackModel);
         string requestedModel = string.IsNullOrWhiteSpace(telemetry.RequestModel)
@@ -122,12 +120,12 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
             ResponseSentUtc = telemetry.ResponseSentUtc,
             RequestedModel = requestedModel,
             ResponseModel = resolvedResponseModel,
-            Provider = telemetry.CloudFallbackUsed ? "cloud" : "local",
-            LocalModelFallbackUsed = DetermineLocalFallbackUsage(telemetry.CloudFallbackUsed, resolvedResponseModel, telemetry.ConfiguredModel),
-            CloudFallbackUsed = telemetry.CloudFallbackUsed,
-            CloudFallbackTierName = telemetry.CloudFallbackChainTelemetry?.TierName,
-            CloudFallbackWinnerIndex = telemetry.CloudFallbackChainTelemetry?.WinnerIndex,
-            CloudFallbackAttemptsJson = telemetry.CloudFallbackChainTelemetry?.AttemptsJson,
+            Provider = "local",
+            LocalModelFallbackUsed = DetermineLocalFallbackUsage(resolvedResponseModel, telemetry.ConfiguredModel),
+            CloudFallbackUsed = false,
+            CloudFallbackTierName = telemetry.ChainTelemetry?.TierName,
+            CloudFallbackWinnerIndex = telemetry.ChainTelemetry?.WinnerIndex,
+            CloudFallbackAttemptsJson = telemetry.ChainTelemetry?.AttemptsJson,
             HttpStatusCode = telemetry.HttpStatusCode,
             Error = telemetry.Error
         };
@@ -149,12 +147,9 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
         }
     }
 
-    static string? ResolveUpstreamResponseModel(OpenAIChatCompletionRequestTelemetry telemetry, string? responseModel) =>
-        telemetry.WinningSource == OpenAIProviderSource.Worker ? null : responseModel;
-
-    static bool DetermineLocalFallbackUsage(bool cloudFallbackUsed, string? responseModel, string? configuredModel)
+    static bool DetermineLocalFallbackUsage(string? responseModel, string? configuredModel)
     {
-        if (cloudFallbackUsed || string.IsNullOrWhiteSpace(responseModel) || string.IsNullOrWhiteSpace(configuredModel))
+        if (string.IsNullOrWhiteSpace(responseModel) || string.IsNullOrWhiteSpace(configuredModel))
         {
             return false;
         }
@@ -182,7 +177,7 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
         return completionTokens.Value / durationSeconds.Value;
     }
 
-    static decimal? TryGetDecimal(IReadOnlyDictionary<string, JsonElement>? metadata, string key)
+    static decimal? TryGetDecimalFromDict(IReadOnlyDictionary<string, JsonElement>? metadata, string key)
     {
         if (metadata is null || metadata.TryGetValue(key, out JsonElement value) is false)
         {
@@ -195,5 +190,35 @@ public sealed class OpenAIChatCompletionTelemetryWriter(
             JsonValueKind.String when decimal.TryParse(value.GetString(), out decimal number) => number,
             _ => null
         };
+    }
+
+    static decimal? TryGetDecimal(JsonElement? element, string key)
+    {
+        if (element is null || element.Value.ValueKind != JsonValueKind.Object || !element.Value.TryGetProperty(key, out JsonElement value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetDecimal(out decimal number) => number,
+            JsonValueKind.String when decimal.TryParse(value.GetString(), out decimal number) => number,
+            _ => null
+        };
+    }
+
+    static int? TryGetInt32(JsonElement? element, string propertyName)
+    {
+        if (element is null || element.Value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (element.Value.TryGetProperty(propertyName, out JsonElement value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int result))
+        {
+            return result;
+        }
+
+        return null;
     }
 }

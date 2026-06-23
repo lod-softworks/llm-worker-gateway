@@ -3,7 +3,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Lod.LlmGateway.Gateway.Data;
 
-[Table("OpenAIChatCompletionStream", Schema = "llm_gateway")]
+[Table("OpenAIChatCompletionStream", Schema = "llm_worker_gateway")]
 public sealed record class OpenAIChatCompletionStreamRecord
 {
     [Key]

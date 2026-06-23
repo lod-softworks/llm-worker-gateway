@@ -258,7 +258,7 @@ public sealed class WorkerWebSocketHandler(
 
             if (message.Result is not null)
             {
-                jobRouter.CompleteModelListJob(message.RequestId, message.Result);
+                jobRouter.CompleteModelListJob(message.RequestId, message.Result.Value);
             }
             else if (!string.IsNullOrWhiteSpace(message.Error))
             {

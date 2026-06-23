@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Lod.LlmGateway.Contracts.Models.LMStudio;
 using Lod.LlmGateway.Contracts.Models.OpenAI;
 
@@ -48,7 +49,7 @@ public sealed record class WorkerJobResultMessage(
 public sealed record class WorkerModelListJobResultMessage(
     string Type,
     string RequestId,
-    OpenAIModelListResponse? Result,
+    JsonElement? Result,
     string? Error);
 
 public sealed record class WorkerJobStreamChunkMessage(

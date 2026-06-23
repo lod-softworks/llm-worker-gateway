@@ -12,11 +12,11 @@ namespace Lod.LlmGateway.Gateway.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.EnsureSchema(
-                name: "llm_gateway");
+                name: "llm_worker_gateway");
 
             migrationBuilder.CreateTable(
                 name: "LMStudioChat",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
@@ -51,7 +51,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
             migrationBuilder.CreateTable(
                 name: "OpenAIChatCompletionDailyRollup",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
@@ -84,7 +84,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
             migrationBuilder.CreateTable(
                 name: "OpenAIChatCompletionRequest",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
@@ -115,7 +115,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
             migrationBuilder.CreateTable(
                 name: "OpenAIChatCompletionNonStream",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
@@ -138,7 +138,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
                     table.ForeignKey(
                         name: "FK_OpenAIChatCompletionNonStream_OpenAIChatCompletionRequest_RequestId",
                         column: x => x.RequestId,
-                        principalSchema: "llm_gateway",
+                        principalSchema: "llm_worker_gateway",
                         principalTable: "OpenAIChatCompletionRequest",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
@@ -146,7 +146,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
             migrationBuilder.CreateTable(
                 name: "OpenAIChatCompletionStream",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 columns: table => new
                 {
                     Id = table.Column<long>(type: "bigint", nullable: false)
@@ -169,7 +169,7 @@ namespace Lod.LlmGateway.Gateway.Migrations
                     table.ForeignKey(
                         name: "FK_OpenAIChatCompletionStream_OpenAIChatCompletionRequest_RequestId",
                         column: x => x.RequestId,
-                        principalSchema: "llm_gateway",
+                        principalSchema: "llm_worker_gateway",
                         principalTable: "OpenAIChatCompletionRequest",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
@@ -177,13 +177,13 @@ namespace Lod.LlmGateway.Gateway.Migrations
 
             migrationBuilder.CreateIndex(
                 name: "IX_OpenAIChatCompletionNonStream_RequestId",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 table: "OpenAIChatCompletionNonStream",
                 column: "RequestId");
 
             migrationBuilder.CreateIndex(
                 name: "IX_OpenAIChatCompletionStream_RequestId",
-                schema: "llm_gateway",
+                schema: "llm_worker_gateway",
                 table: "OpenAIChatCompletionStream",
                 column: "RequestId");
         }
@@ -193,23 +193,23 @@ namespace Lod.LlmGateway.Gateway.Migrations
         {
             migrationBuilder.DropTable(
                 name: "LMStudioChat",
-                schema: "llm_gateway");
+                schema: "llm_worker_gateway");
 
             migrationBuilder.DropTable(
                 name: "OpenAIChatCompletionDailyRollup",
-                schema: "llm_gateway");
+                schema: "llm_worker_gateway");
 
             migrationBuilder.DropTable(
                 name: "OpenAIChatCompletionNonStream",
-                schema: "llm_gateway");
+                schema: "llm_worker_gateway");
 
             migrationBuilder.DropTable(
                 name: "OpenAIChatCompletionStream",
-                schema: "llm_gateway");
+                schema: "llm_worker_gateway");
 
             migrationBuilder.DropTable(
                 name: "OpenAIChatCompletionRequest",
-                schema: "llm_gateway");
+                schema: "llm_worker_gateway");
         }
     }
 }

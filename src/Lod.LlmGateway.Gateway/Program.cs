@@ -3,25 +3,20 @@ using Lod.LlmGateway.Contracts.HttpContracts.OpenAI;
 using Lod.LlmGateway.Contracts.Models.LMStudio;
 using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Api;
-using Lod.LlmGateway.Gateway.Configuration;
 using Lod.LlmGateway.Gateway.Data;
 using Lod.LlmGateway.Gateway.Handlers;
 using Lod.LlmGateway.Gateway.Jobs;
 using Lod.LlmGateway.Gateway.Workers;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Scalar.AspNetCore;
 
-var builder = WebApplication.CreateBuilder(args);
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-builder.Configuration.AddConfiguredAzureKeyVault();
+builder.Configuration.AddAzureKeyVault();
 
 builder.Services.Configure<Lod.LlmGateway.Gateway.Api.ApiKeyOptions>(
     builder.Configuration.GetSection("ApiKeys"));
-builder.Services.Configure<OpenAIChatCompletionOptions>(builder.Configuration.GetSection("OpenAIChatCompletions"));
-builder.Services.AddSingleton<OpenAIChatCompletionHttpExecutor>();
-builder.Services.AddSingleton<OpenAIModelListHttpExecutor>();
-builder.Services.AddSingleton<OpenAIChatCompletionProviderChainService>();
-builder.Services.AddSingleton<OpenAIModelListProviderService>();
 
 string databaseProvider = builder.Configuration["Database:Provider"] ?? "SqlServer";
 builder.Services.AddDbContext<GatewayDbContext>(options =>
@@ -33,14 +28,13 @@ builder.Services.AddDbContext<GatewayDbContext>(options =>
     }
     else if (databaseProvider.Equals("SqlServer", StringComparison.OrdinalIgnoreCase))
     {
-        options.UseSqlServer(connectionString);
+        options.UseSqlServer(connectionString, c => c.MigrationsHistoryTable("__EFMigrationsHistory"));
     }
     else
     {
         throw new InvalidOperationException($"Unsupported database provider '{databaseProvider}'. Supported values are 'SqlServer' and 'Sqlite'.");
     }
 });
-builder.Services.AddScoped<DbInitializer>();
 builder.Services.AddScoped<OpenAIChatCompletionTelemetryWriter>();
 builder.Services.AddScoped<LMStudioChatTelemetryWriter>();
 builder.Services.AddSingleton<WorkerRegistry>();
@@ -57,7 +51,7 @@ builder.Services.AddRazorPages();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
 
-var app = builder.Build();
+WebApplication app = builder.Build();
 
 app.UseExceptionHandler(exceptionApp =>
 {
@@ -109,7 +103,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
     app.MapScalarApiReference(options =>
     {
-        options.WithTitle("Lod LLM Gateway");
+        options.WithTitle("LLM Gateway Worker");
     });
 }
 
@@ -140,10 +134,10 @@ openAiGroup.MapGet("/models", async (HttpContext context, OpenAIModelListHandler
     .WithDescription("""
                     OpenAI-compatible model listing endpoint. The gateway queries configured OpenAI providers in order (Worker and/or Api sources) and returns the first successful `/v1/models` response.
                     """)
-    .Produces<OpenAIModelListResponse>(StatusCodes.Status200OK, "application/json");
+    .Produces<JsonElement>(StatusCodes.Status200OK, "application/json");
 
 app.MapPost("/api/v1/chat", async (HttpContext context, LMStudioChatHandler handler, CancellationToken cancellationToken) =>
-    await handler.HandleAsync(context, cancellationToken))
+        await handler.HandleAsync(context, cancellationToken))
     .WithTags("LM Studio")
     .WithSummary("Chat with the LLM using LM Studio API")
     .WithDescription("""
@@ -163,8 +157,16 @@ app.Map("/ws/worker", async (HttpContext context, WorkerWebSocketHandler handler
 
 using (IServiceScope scope = app.Services.CreateScope())
 {
-    DbInitializer initializer = scope.ServiceProvider.GetRequiredService<DbInitializer>();
-    await initializer.InitializeAsync(CancellationToken.None);
+    DbContext dbContext = scope.ServiceProvider.GetRequiredService<GatewayDbContext>();
+
+    if (dbContext.Database.IsSqlite())
+    {
+        await dbContext.Database.EnsureCreatedAsync();
+    }
+    else
+    {
+        await dbContext.Database.MigrateAsync();
+    }
 }
 
 await app.RunAsync();

@@ -1,25 +1,21 @@
-using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Api;
 using Lod.LlmGateway.Gateway.Data;
 using Lod.LlmGateway.Gateway.Workers;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
-using System.Globalization;
 using System.Text;
+using System.Globalization;
 
 namespace Lod.LlmGateway.Gateway.Pages;
 
 public class IndexModel(
     WorkerRegistry workerRegistry,
     IWebHostEnvironment environment,
-    GatewayDbContext dbContext,
-    IOptions<OpenAIChatCompletionOptions> openAiChatCompletionOptions) : PageModel
+    GatewayDbContext dbContext) : PageModel
 {
     public WorkerRegistry WorkerRegistry { get; } = workerRegistry;
     public bool IsDevelopment { get; } = environment.IsDevelopment();
     public int RegisteredWorkerCount => WorkerRegistry.RegisteredWorkerCount;
-    public int ConfiguredCloudProviderCount { get; } = CountConfiguredCloudProviders(openAiChatCompletionOptions.Value.Providers);
     public BranchMetricWindow AllTimeMetrics { get; private set; } = BranchMetricWindow.Empty("All time");
     public BranchMetricWindow Last24HoursMetrics { get; private set; } = BranchMetricWindow.Empty("Last 24");
 
@@ -52,19 +48,7 @@ public class IndexModel(
             FilterStreamCompletionsByResponseSent(streamCompletions, trailing24HoursStart));
     }
 
-    static int CountConfiguredCloudProviders(IReadOnlyList<OpenAIChatCompletionProvider> providers)
-    {
-        int count = 0;
-        foreach (OpenAIChatCompletionProvider provider in providers)
-        {
-            if (provider.Source == OpenAIProviderSource.Api)
-            {
-                count++;
-            }
-        }
 
-        return count;
-    }
 
     static List<ChatCompletionRequestSnapshot> BuildRequestSnapshots(IReadOnlyList<OpenAIChatCompletionRequestRecord> records)
     {

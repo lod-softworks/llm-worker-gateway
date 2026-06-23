@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Lod.LlmGateway.Contracts.Models.OpenAI;
 
 namespace Lod.LlmGateway.Gateway.Data;
 
@@ -46,7 +45,4 @@ public sealed class OpenAIChatCompletionChainStreamTelemetryCapture
     public string? TerminalError { get; set; }
 
     public string? ResponseModel { get; set; }
-
-    /// <summary>Which provider kind completed the stream successfully, when <see cref="OpenAIChatCompletionChainTelemetry.CloudChainSucceeded"/>.</summary>
-    public OpenAIProviderSource? WinningSource { get; set; }
 }

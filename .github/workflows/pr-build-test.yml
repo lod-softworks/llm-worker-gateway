@@ -1,5 +1,5 @@
 name: PR build and test
-run-name: Code Review of ${{ github.head_ref || github.ref_name }}
+run-name: Code review of ${{ github.head_ref || github.ref_name }}
 
 
 on:

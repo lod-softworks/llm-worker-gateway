@@ -27,8 +27,8 @@ public sealed record class ChatCompletionResponse
     public string? SystemFingerprint { get; init; }
 
     [JsonPropertyName("choices")]
-    public List<ChatCompletionChoice> Choices { get; init; } = [];
+    public JsonElement Choices { get; init; }
 
     [JsonPropertyName("usage")]
-    public ChatCompletionUsage? Usage { get; init; }
+    public JsonElement? Usage { get; init; }
 }

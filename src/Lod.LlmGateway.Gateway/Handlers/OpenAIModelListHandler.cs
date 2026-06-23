@@ -1,11 +1,12 @@
 using Lod.LlmGateway.Contracts.Models.OpenAI;
 using Lod.LlmGateway.Gateway.Api;
 using Lod.LlmGateway.Gateway.Jobs;
+using System.Text.Json;
 
 namespace Lod.LlmGateway.Gateway.Handlers;
 
 public sealed class OpenAIModelListHandler(
-    OpenAIModelListProviderService modelListProviderService,
+    JobRouter jobRouter,
     ApiKeyAuthorizer apiKeyAuthorizer)
 {
     static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
@@ -22,7 +23,7 @@ public sealed class OpenAIModelListHandler(
 
         try
         {
-            OpenAIModelListResponse result = await modelListProviderService.ListModelsAsync(
+            JsonElement result = await jobRouter.EnqueueModelListAndAwaitAsync(
                 DefaultTimeout,
                 cancellationToken);
             return Results.Json(result, statusCode: StatusCodes.Status200OK, contentType: "application/json");

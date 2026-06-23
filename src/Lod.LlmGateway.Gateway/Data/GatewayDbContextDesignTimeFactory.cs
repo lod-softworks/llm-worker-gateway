@@ -7,9 +7,9 @@ public class GatewayDbContextDesignTimeFactory : IDesignTimeDbContextFactory<Gat
 {
     public GatewayDbContext CreateDbContext(string[] args)
     {
-        var connectionString = "Server=(localdb)\\mssqllocaldb;Database=Llm.Gateway.Host;Trusted_Connection=true;MultipleActiveResultSets=true";
+        var connectionString = "Server=(localdb)\\mssqllocaldb;Database=Llm.Gateway.Worker;Trusted_Connection=true;MultipleActiveResultSets=true";
         var builder = new DbContextOptionsBuilder<GatewayDbContext>()
-            .UseSqlServer(connectionString, options => options.MigrationsHistoryTable("__EFMigrationsHistory", "llm_gateway"));
+            .UseSqlServer(connectionString, options => options.MigrationsHistoryTable("__EFMigrationsHistory", "llm_worker_gateway"));
 
         return new GatewayDbContext(builder.Options);
     }
