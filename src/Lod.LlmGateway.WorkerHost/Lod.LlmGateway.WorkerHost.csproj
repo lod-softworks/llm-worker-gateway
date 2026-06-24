@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <AssemblyTitle>Lod LLM Gateway Worker</AssemblyTitle>
+    <Product>Lod LLM Gateway Worker Host</Product>
+    <Description>Windows worker service that connects to the Lod LLM Gateway and calls upstream OpenAI-compatible hosts.</Description>
+    <WindowsService>true</WindowsService>
+    <UserSecretsId>dotnet-Lod.LlmGateway.WorkerHost-12f22139-d8ec-4bec-acac-b1a7ee7d086f</UserSecretsId>
+    <ApplicationIcon>favicon.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Self-contained publish bundles the exact runtime and NuGet assemblies so the service does not load Microsoft.Extensions.Configuration from the machine's shared framework (avoids TypeLoadException for ConfigurationBuilderProperties.get_Keys). -->
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="favicon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Lod.LlmGateway.Contracts\Lod.LlmGateway.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>
