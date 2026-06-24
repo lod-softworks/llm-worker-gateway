@@ -82,3 +82,10 @@ Development gateway defaults use SQLite at `src/Lod.LlmGateway.Gateway/App_Data/
 ## Documentation Maintenance
 
 Keep `README.md` high-level and human-focused. Update `REQUIREMENTS.md` whenever worker connectivity, endpoint contracts, configuration, routing, telemetry, deployment, or security behavior changes.
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+
+The "Lod Softworks" name, logo, icons, and related brand assets are copyrighted and trademarked property of Lod Softworks LLC, and are **not** licensed under the open-source license. See [TRADEMARK.md](TRADEMARK.md) for branding guidelines.
+
