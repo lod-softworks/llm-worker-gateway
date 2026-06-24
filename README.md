@@ -1,6 +1,6 @@
 # LLM Worker Gateway
 
-LLM Worker Gateway contains the Windows worker service and the gateway API that coordinates connected workers. The gateway accepts OpenAI-compatible and LM Studio-compatible client requests, routes work to connected workers, and can optionally fall back to direct OpenAI-compatible API providers.
+LLM Worker Gateway contains the Windows worker service and the gateway API that coordinates connected workers. The gateway accepts OpenAI-compatible and LM Studio-compatible client requests and routes work to connected workers.
 
 This repository owns:
 
@@ -16,8 +16,8 @@ This repository owns:
 - LM Studio-compatible `POST /api/v1/chat`.
 - Worker WebSocket endpoint at `/ws/worker`.
 - Windows worker host that connects outbound to the gateway and calls local or remote model APIs.
-- Ordered provider-chain routing for worker-backed and direct API providers.
-- EF Core telemetry for request attempts, winning providers, usage, and daily rollups.
+- Sequential job dispatch and failover across available connected workers.
+- EF Core telemetry for request attempts, winning workers, usage, and daily rollups.
 - Development OpenAPI and Scalar UI.
 
 ## Repository Layout
@@ -34,7 +34,6 @@ Gateway settings:
 
 - `ApiKeys:WorkerKey` - shared key accepted by worker WebSocket connections.
 - `ApiKeys:Clients` - client key dictionary used for API request authorization.
-- `OpenAIChatCompletions:Providers` - ordered provider chain for model routing and failover.
 - `Database:Provider` - `SqlServer` or `Sqlite`.
 - `ConnectionStrings:Gateway` - telemetry database connection string.
 - Optional `AzureKeyVault:VaultUri` or `KeyVault:VaultUri`.
@@ -78,7 +77,7 @@ Run tests:
 dotnet test
 ```
 
-Development gateway defaults use SQLite at `src/Lod.LlmGateway.Gateway/App_Data/Llm.Gateway.db` and a worker-backed provider that accepts any model.
+Development gateway defaults use SQLite at `src/Lod.LlmGateway.Gateway/App_Data/Llm.Gateway.db` and routes client requests to available connected workers.
 
 ## Documentation Maintenance
 

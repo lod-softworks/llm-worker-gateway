@@ -130,9 +130,9 @@ RouteGroupBuilder openAiGroup = app.MapGroup("/v1")
 openAiGroup.MapPost("/chat/completions", async (HttpContext context, OpenAIChatCompletionHandler handler, CancellationToken cancellationToken) =>
         await handler.HandleAsync(context, cancellationToken))
     .WithDescription("""
-                     OpenAI-compatible chat completions endpoint. The gateway matches the requested model to an ordered list of configured OpenAI providers (see OpenAIProviders). Each provider either dispatches to a WebSocket worker or calls an OpenAI-compatible HTTP API. A chain of all matching providers is run in order until a step succeeds.
+                     OpenAI-compatible chat completions endpoint. The gateway dispatches the request to available connected WebSocket workers. If multiple workers are connected and available, the gateway attempts execution sequentially until one succeeds.
 
-                     The gateway deserializes the request into a full OpenAI-style chat-completions object, preserves JSON extension properties, and forwards the merged body to the upstream provider (worker or Api step). Per-step `Model` overrides and `stream` flags are applied for each hop. `max_completion_tokens` to `max_tokens` mirroring is configurable per provider (`CopyMaxCompletionTokensToMaxTokens`) so cloud providers can preserve exact request semantics while LM Studio-oriented providers can enable legacy-field compatibility. Unsupported fields on a given upstream are rejected by that server, not stripped by the gateway.
+                     The gateway deserializes the request into a full OpenAI-style chat-completions object, preserves JSON extension properties, and forwards the merged body to the worker. Any unsupported fields on a given upstream are rejected by that server, not stripped by the gateway.
 
                      Official OpenAI API documentation:
                      - https://platform.openai.com/docs/api-reference/chat
@@ -145,7 +145,7 @@ openAiGroup.MapPost("/chat/completions", async (HttpContext context, OpenAIChatC
 openAiGroup.MapGet("/models", async (HttpContext context, OpenAIModelListHandler handler, CancellationToken cancellationToken) =>
         await handler.HandleAsync(context, cancellationToken))
     .WithDescription("""
-                    OpenAI-compatible model listing endpoint. The gateway queries configured OpenAI providers in order (Worker and/or Api sources) and returns the first successful `/v1/models` response.
+                    OpenAI-compatible model listing endpoint. The gateway queries available connected WebSocket workers and returns the first successful `/v1/models` response.
                     """)
     .Produces<Lod.LlmGateway.Contracts.Models.OpenAI.ModelListResponse>(StatusCodes.Status200OK, "application/json");
 
