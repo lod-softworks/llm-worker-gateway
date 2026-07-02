@@ -50,11 +50,11 @@ public sealed class LMStudioChatHandler(
         }
 
         return request.Stream
-            ? HandleStreamResponse(requestId, clientName, request, requestReceivedUtc, cancellationToken)
+            ? await HandleStreamResponse(requestId, clientName, request, requestReceivedUtc, cancellationToken)
             : await HandleNonStreamResponseAsync(requestId, clientName, request, requestReceivedUtc, cancellationToken);
     }
 
-    private IResult HandleStreamResponse(
+    private async Task<IResult> HandleStreamResponse(
         Guid requestId,
         string? clientName,
         LMStudioChatRequest request,
@@ -62,6 +62,57 @@ public sealed class LMStudioChatHandler(
         CancellationToken cancellationToken)
     {
         logger.LogTrace("Streaming LM Studio response ({Id}).", requestId);
+
+        IAsyncEnumerator<StreamChunk> enumerator;
+        try
+        {
+            enumerator = jobRouter.EnqueueLMStudioAndStreamAsync(
+                request,
+                DefaultTimeout,
+                cancellationToken).GetAsyncEnumerator(cancellationToken);
+        }
+        catch (NoWorkerAvailableException ex)
+        {
+            return GatewayResults.LMStudioError(StatusCodes.Status503ServiceUnavailable, ex.Message);
+        }
+
+        bool moved;
+        try
+        {
+            moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status504GatewayTimeout, "The request timed out.");
+        }
+        catch (NoWorkerAvailableException ex)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status503ServiceUnavailable, ex.Message);
+        }
+        catch (JobFailedException ex)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status502BadGateway, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status502BadGateway, ex.Message);
+        }
+
+        if (moved is false)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status502BadGateway, "All connected workers failed to complete the request.");
+        }
+
+        if (enumerator.Current is { IsDone: true, Error: { Length: > 0 } workerError })
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.LMStudioError(StatusCodes.Status502BadGateway, workerError);
+        }
 
         return Results.Stream(
             async (outputStream) =>
@@ -71,22 +122,22 @@ public sealed class LMStudioChatHandler(
 
                 try
                 {
-                    await foreach (StreamChunk chunk in jobRouter.EnqueueLMStudioAndStreamAsync(
-                        request,
-                        DefaultTimeout,
-                        cancellationToken))
+                    bool hasMore = true;
+                    StreamChunk currentChunk = enumerator.Current;
+
+                    while (hasMore)
                     {
                         string line;
-                        if (chunk.IsDone)
+                        if (currentChunk.IsDone)
                         {
-                            if (!string.IsNullOrEmpty(chunk.Error))
+                            if (!string.IsNullOrEmpty(currentChunk.Error))
                             {
-                                streamError = chunk.Error;
+                                streamError = currentChunk.Error;
                                 string errorPayload = JsonSerializer.Serialize(new
                                 {
                                     error = new
                                     {
-                                        message = chunk.Error,
+                                        message = currentChunk.Error,
                                         code = (string?)null
                                     }
                                 });
@@ -98,7 +149,7 @@ public sealed class LMStudioChatHandler(
                         }
                         else
                         {
-                            line = $"data: {chunk.Data}\n\n";
+                            line = $"data: {currentChunk.Data}\n\n";
                         }
 
                         byte[] bytes = Encoding.UTF8.GetBytes(line);
@@ -109,38 +160,31 @@ public sealed class LMStudioChatHandler(
                         {
                             logger.LogTrace("Response chunk for LM Studio chat request ({Id}): {Chunk}", requestId, line);
                         }
+
+                        if (currentChunk.IsDone)
+                        {
+                            break;
+                        }
+
+                        try
+                        {
+                            hasMore = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                            if (hasMore)
+                            {
+                                currentChunk = enumerator.Current;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning(ex, "An exception occurred while streaming LM Studio chat completions for request ({Id}).", requestId);
+                            streamError = ex.Message;
+                            break;
+                        }
                     }
                 }
-                catch (OperationCanceledException)
+                finally
                 {
-                }
-                catch (NoWorkerAvailableException)
-                {
-                    streamError = "No workers are currently connected.";
-                    string errorPayload = JsonSerializer.Serialize(new
-                    {
-                        error = new
-                        {
-                            message = streamError,
-                            code = (string?)null
-                        }
-                    });
-                    await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
-                    await outputStream.FlushAsync(cancellationToken);
-                }
-                catch (JobFailedException ex)
-                {
-                    streamError = ex.Message;
-                    string errorPayload = JsonSerializer.Serialize(new
-                    {
-                        error = new
-                        {
-                            message = streamError,
-                            code = (string?)null
-                        }
-                    });
-                    await outputStream.WriteAsync(Encoding.UTF8.GetBytes($"data: {errorPayload}\n\n"), cancellationToken);
-                    await outputStream.FlushAsync(cancellationToken);
+                    await enumerator.DisposeAsync().ConfigureAwait(false);
                 }
 
                 await telemetryWriter.WriteAsync(

@@ -51,17 +51,48 @@ public sealed class OpenAIChatCompletionHandler(
         }
 
         return request.Stream
-            ? HandleStreamResponse(requestId, clientName, request, requestReceivedUtc, cancellationToken)
+            ? await HandleStreamResponse(requestId, clientName, request, requestReceivedUtc, cancellationToken)
             : await HandleNonStreamResponseAsync(requestId, clientName, request, requestReceivedUtc, cancellationToken);
     }
 
-    private IResult HandleStreamResponse(
+    private async Task<IResult> HandleStreamResponse(
         Guid requestId,
         string? clientName,
         ChatCompletionRequest request,
         DateTimeOffset requestReceivedUtc,
         CancellationToken cancellationToken)
     {
+        OpenAIChatCompletionChainStreamTelemetryCapture capture = new();
+
+        IAsyncEnumerator<StreamChunk> enumerator = jobRouter.EnqueueAndStreamAsync(
+            request,
+            capture,
+            DefaultTimeout,
+            cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+        bool moved;
+        try
+        {
+            moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.OpenAIError(StatusCodes.Status502BadGateway, ex.Message);
+        }
+
+        if (moved is false)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.OpenAIError(StatusCodes.Status502BadGateway, "All connected workers failed to complete the request.");
+        }
+
+        if (enumerator.Current is { IsDone: true, Error: { Length: > 0 } workerError })
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            return GatewayResults.OpenAIError(StatusCodes.Status502BadGateway, workerError);
+        }
+
         return Results.Stream(
             async (outputStream) =>
             {
@@ -72,26 +103,25 @@ public sealed class OpenAIChatCompletionHandler(
                 int streamChunkCount = 0;
                 JsonElement? streamUsage = null;
                 string? rawStreamUsageJson = null;
-                OpenAIChatCompletionChainStreamTelemetryCapture capture = new();
+
                 try
                 {
-                    await foreach (StreamChunk chunk in jobRouter.EnqueueAndStreamAsync(
-                        request,
-                        capture,
-                        DefaultTimeout,
-                        cancellationToken))
+                    bool hasMore = true;
+                    StreamChunk currentChunk = enumerator.Current;
+
+                    while (hasMore)
                     {
                         string line;
-                        if (chunk.IsDone)
+                        if (currentChunk.IsDone)
                         {
-                            if (!string.IsNullOrEmpty(chunk.Error))
+                            if (!string.IsNullOrEmpty(currentChunk.Error))
                             {
-                                streamError = chunk.Error;
+                                streamError = currentChunk.Error;
                                 string errorPayload = JsonSerializer.Serialize(new
                                 {
                                     error = new
                                     {
-                                        message = chunk.Error,
+                                        message = currentChunk.Error,
                                         type = "server_error",
                                         code = (string?)null
                                     }
@@ -104,17 +134,17 @@ public sealed class OpenAIChatCompletionHandler(
                         }
                         else
                         {
-                            capture.ResponseModel = ResolveStreamResponseModel(chunk.Data, capture.ResponseModel);
-                            StreamUsageCapture usageCapture = ResolveStreamUsage(chunk.Data, streamUsage, rawStreamUsageJson);
+                            capture.ResponseModel = ResolveStreamResponseModel(currentChunk.Data, capture.ResponseModel);
+                            StreamUsageCapture usageCapture = ResolveStreamUsage(currentChunk.Data, streamUsage, rawStreamUsageJson);
                             streamUsage = usageCapture.Usage;
                             rawStreamUsageJson = usageCapture.RawUsageJson;
-                            if (!string.Equals(chunk.Data, "[DONE]", StringComparison.Ordinal))
+                            if (!string.Equals(currentChunk.Data, "[DONE]", StringComparison.Ordinal))
                             {
                                 streamChunkCount++;
                                 firstChunkSentUtc ??= DateTimeOffset.UtcNow;
                             }
 
-                            line = $"data: {chunk.Data}\n\n";
+                            line = $"data: {currentChunk.Data}\n\n";
                         }
 
                         await outputStream.WriteAsync(Encoding.UTF8.GetBytes(line), cancellationToken);
@@ -125,11 +155,31 @@ public sealed class OpenAIChatCompletionHandler(
                         {
                             logger.LogTrace("Response chunk for completion request ({Id}): {Chunk}", requestId, line);
                         }
+
+                        if (currentChunk.IsDone)
+                        {
+                            break;
+                        }
+
+                        try
+                        {
+                            hasMore = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                            if (hasMore)
+                            {
+                                currentChunk = enumerator.Current;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning(ex, "An exception occurred while streaming chat completions for request ({Id}).", requestId);
+                            streamError = ex.Message;
+                            break;
+                        }
                     }
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                finally
                 {
-                    throw;
+                    await enumerator.DisposeAsync().ConfigureAwait(false);
                 }
 
                 if (capture.Telemetry.CloudChainSucceeded is false && string.IsNullOrEmpty(streamError))
